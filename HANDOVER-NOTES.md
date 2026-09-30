@@ -8,20 +8,35 @@ Announcements, Events, Holidays/Calendar and Dashboard modules.
 
 ## 1. Deploying these changes
 
-### Database migrations (run before starting the new backend)
+### Deployment order (one maintenance window)
+
+1. **Back up the database** (for example `pg_dump -Fc -f hrm_before_handover.dump <db>`).
+   The migrations are small and reversible, but take a backup anyway.
+2. Stop the backend.
+3. Run the migrations (below).
+4. Set the new environment variables (below).
+5. Deploy the **backend and frontend together**. The new backend expects the new
+   frontend: a new employee would otherwise have no `/change-password` screen,
+   and disabling 2FA now requires the password.
+6. Start the backend and check `GET /` returns 200.
+
+### Database migrations (run in this order, before starting the new backend)
 
 ```bash
 cd backend
-alembic upgrade head
+alembic current          # expect 77e63f4240ef (the head on main before this change)
+alembic upgrade head     # runs the two migrations below, in order
+alembic current          # expect b8d4f0e2a6c1 (head)
 ```
 
-| Revision | Adds | Notes |
-|---|---|---|
-| `a7c3e9d1f2b4` | `users.must_change_password` (bool, NOT NULL, default `false`), `otp_records.attempts` (int, NOT NULL, default `0`) | Existing users are unaffected (`false`). |
-| `b8d4f0e2a6c1` | `users.temp_password_expires_at` (timestamp, nullable) | `NULL` = no temporary password outstanding. |
+| Order | Revision | Adds | Notes |
+|---|---|---|---|
+| 1 | `a7c3e9d1f2b4` | `users.must_change_password` (bool, NOT NULL, default `false`), `otp_records.attempts` (int, NOT NULL, default `0`) | Every existing user gets `false`. |
+| 2 | `b8d4f0e2a6c1` | `users.temp_password_expires_at` (timestamp, nullable) | Every existing user gets `NULL`. |
 
-Both are chained after the previous head `77e63f4240ef`, so `alembic heads`
-shows a single head. Both were tested upgrade → downgrade → upgrade.
+Both are chained after `77e63f4240ef`, so `alembic heads` shows a single head.
+They were tested on a copy of main's schema: upgrade, downgrade, upgrade, and a
+full rollback to `77e63f4240ef` with user data intact.
 
 The backend **will fail at runtime** if the code is deployed without these
 migrations: the new columns are read on every login.
@@ -30,14 +45,52 @@ migrations: the new columns are read on every login.
 
 | Variable | Default | Set it when |
 |---|---|---|
-| `TRUST_PROXY_HEADERS` | `false` | **Set `true` when the API runs behind nginx, a load balancer or any reverse proxy.** The login/OTP rate limiter then uses the client IP from `X-Forwarded-For`. If it stays `false` behind a proxy, every user appears to come from the proxy's IP and a few failed logins lock out everyone. If it's `true` without a proxy, clients can fake their IP and bypass the limits. |
+| `TRUST_PROXY_HEADERS` | `false` | **Set `true` when the API runs behind nginx, a load balancer or any reverse proxy.** The login/OTP rate limiter then uses the client IP from `X-Forwarded-For`. The previous code always trusted that header, so if production is behind a proxy and this stays `false`, every user appears to come from the proxy's IP and a few failed logins lock out everyone. If it's `true` without a proxy, clients can fake their IP and bypass the limits. |
 | `TEMP_PASSWORD_EXPIRE_DAYS` | `7` | Days an emailed temporary password stays valid. |
-| `INTERNAL_API_KEY` | *(empty)* | Only if another service calls `POST /notifications/internal`. Empty means the endpoint is disabled (returns 503). Use a long random value. |
+| `INTERNAL_API_KEY` | *(empty)* | Only if another service calls `POST /notifications/internal`. Empty means the endpoint is disabled (returns 503). Use a long random value. Nothing in this repo calls it. |
 | `APP_TZ_OFFSET_MINUTES` | `330` | Organisation's UTC offset (Sri Lanka = UTC+5:30). Existing variable, now documented. |
 
 Also confirm for production: `ENVIRONMENT=production`, `COOKIE_SECURE=true`.
 
----
+### What existing users experience on the first deployment
+
+- **Nobody is logged out.** Access and refresh tokens issued before the deploy
+  stay valid; this was verified with tokens in the old format.
+- **Nobody is wrongly forced to change their password.** Every existing account
+  gets `must_change_password = false` and no expiry. Only employees created
+  *after* the deploy, or anyone HR uses "Resend login details" on, go through
+  the first-login change.
+- **Existing passwords keep working**, even ones weaker than the new policy.
+  The policy applies only when a password is set or changed.
+- **2FA users** log in exactly as before, and now stay logged in past 15
+  minutes (bug fix). Disabling 2FA now asks for their password.
+- **Profile:** only edited fields are validated, so existing data in an older
+  format doesn't block saving other changes.
+- **Events:** those created before this release from the dashboard widget may
+  show 5.5 hours off (see Known issues).
+- **Messages:** the custom-group options disappear from the compose screen.
+
+### Rollback plan
+
+If something goes wrong after deploying:
+
+1. **Code:** revert the merge commit on `main` and redeploy the previous build:
+   ```bash
+   git revert -m 1 <merge-commit-sha>
+   ```
+   With a squash merge, `git revert <squash-commit-sha>` instead.
+2. **Database:** only needed if the old code is redeployed. The old code does
+   not use the new columns, but downgrading keeps the schema exactly as main
+   expects:
+   ```bash
+   cd backend
+   alembic downgrade 77e63f4240ef   # drops temp_password_expires_at, must_change_password, otp_records.attempts
+   alembic current                  # expect 77e63f4240ef
+   ```
+   The downgrade removes only those three columns; no other data is touched.
+   Employees who were mid-way through first login keep their temporary
+   password, but without the forced change.
+3. If anything else looks wrong, restore the backup taken in step 1.
 
 ## 2. First-login flow (new employees)
 
@@ -155,11 +208,18 @@ Forgot Password → reset.
    with DOMPurify) before rendering, or sanitise on save in the recruitment
    backend. This page is public, so it's a stored-XSS risk.
 4. **A brand-new empty database can't be built with `alembic upgrade head`
-   alone.** Migration `ba8ad705d455` drops a constraint that only exists on
-   databases originally created with `create_all()`. Existing databases migrate
-   fine. For a fresh install, fix that migration (for example
-   `DROP CONSTRAINT IF EXISTS`), or build the schema and then
-   `alembic stamp head`.
+   alone.** The migration history was only ever run against databases first
+   created with `create_all()`. Migration `ba8ad705d455` drops objects a fresh
+   database never had, and the very next one (`a02a4429c1fe`) re-adds
+   `users.is_deleted` with a different definition. Fixing that means editing
+   several historical migrations, so it was deliberately left alone. Existing
+   databases are unaffected. **For a fresh install**, build the schema from the
+   models, then mark it current (verified to work):
+   ```bash
+   cd backend
+   python -c "import app.main; from app.database.base import Base; from app.database.database import engine; Base.metadata.create_all(bind=engine)"
+   alembic stamp head
+   ```
 5. **Custom message groups were removed.** They never had members, so a
    message sent to one reached nobody. The `/messages/groups` endpoints and the
    compose-screen group controls are gone. Messages can target All, All
@@ -183,6 +243,12 @@ Forgot Password → reset.
 - `backend/tests/test_handover_validation.py` covers the password policy, the
   first-login gate and endpoint, session hardening, the OTP flow, temp-password
   expiry and resend, and each module's validation schemas.
-- Run everything with `cd backend && pytest -q`. The remaining failures are
-  pre-existing and outside these modules: `test_employees.py`,
-  `test_recruitment.py` and `test_document_type_service.py`.
+- Run everything with `cd backend && pytest -q`. Expected result: 134 passed,
+  11 failed and 8 errors. The failures and errors are pre-existing and outside
+  these modules (`test_employees.py`, `test_recruitment.py`,
+  `test_document_type_service.py`); they fail identically on `main` before this
+  change.
+- Checked on the merge of this branch into `main`: no merge conflicts, a single
+  Alembic head, migrations up/down/up and full rollback, the full backend suite,
+  frontend type-check and lint (no new problems), `npm run build`, and the
+  backend starting against the migrated database.
