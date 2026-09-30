@@ -10,6 +10,15 @@ from app.core.jwt import SECRET_KEY, ALGORITHM
 
 security = HTTPBearer(auto_error=False)
 
+# Returned as the 403 detail while a first-login password change is pending;
+# the frontend matches on this exact string to redirect to /change-password.
+PASSWORD_CHANGE_REQUIRED = "PASSWORD_CHANGE_REQUIRED"
+PASSWORD_CHANGE_ALLOWED_PATHS = {
+    "/auth/me",
+    "/auth/logout",
+    "/auth/first-login/password",
+}
+
 
 def get_current_user(
     request: Request,
@@ -34,9 +43,13 @@ def get_current_user(
         # Block temporary 2FA tokens from accessing regular endpoints
         if payload.get("type") == "2fa":
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, 
+                status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Temporary 2FA token cannot access this endpoint"
             )
+        # Refresh tokens live 7 days and are only meant for /auth/refresh —
+        # never accept one as a bearer access token.
+        if payload.get("type") == "refresh":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
@@ -49,8 +62,14 @@ def get_current_user(
         .filter(User.id == int(user_id))
         .first()
     )
-    if not user:
+    if not user or user.is_active is False:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    # First login with an emailed temporary password: nothing but the password
+    # change (plus reading who you are and logging out) is allowed until the
+    # user picks their own password.
+    if getattr(user, "must_change_password", False) and request.url.path not in PASSWORD_CHANGE_ALLOWED_PATHS:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PASSWORD_CHANGE_REQUIRED)
     return user
 
 
