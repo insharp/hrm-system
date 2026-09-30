@@ -110,30 +110,37 @@ export default function ProfileSettingsPage() {
     setMsg({ text: "", type: "" });
   };
 
+  /**
+   * True when the user edited this field. Only edited fields are validated and
+   * sent, so data saved before the validation rules existed (e.g. an old phone
+   * format) never blocks saving an unrelated change.
+   */
+  const isChanged = (key: keyof typeof formData) => !originalData || formData[key] !== originalData[key];
+
   /** Mirrors backend UserProfileUpdate validation so mistakes show instantly. */
   const validateProfile = (): string | null => {
     const nameRe = /^[\p{L}]+(?:[ .'\-]+[\p{L}]+)*\.?$/u;
     const phoneRe = /^\+?[0-9\s\-()]{7,15}$/;
     const first = formData.first_name.trim();
     const last = formData.last_name.trim();
-    if (!first) return "First name is required.";
-    if (!last) return "Last name is required.";
-    if (!nameRe.test(first) || !nameRe.test(last)) {
+    if (isChanged("first_name") && !first) return "First name is required.";
+    if (isChanged("last_name") && !last) return "Last name is required.";
+    if ((isChanged("first_name") && !nameRe.test(first)) || (isChanged("last_name") && !nameRe.test(last))) {
       return "Names may only contain letters, spaces, apostrophes, dots and hyphens.";
     }
-    if (formData.phone_number.trim() && !phoneRe.test(formData.phone_number.trim())) {
+    if (isChanged("phone_number") && formData.phone_number.trim() && !phoneRe.test(formData.phone_number.trim())) {
       return "Please enter a valid phone number.";
     }
-    if (formData.emergency_contact_number.trim() && !phoneRe.test(formData.emergency_contact_number.trim())) {
+    if (isChanged("emergency_contact_number") && formData.emergency_contact_number.trim() && !phoneRe.test(formData.emergency_contact_number.trim())) {
       return "Please enter a valid emergency contact number.";
     }
-    if (formData.emergency_contact_name.trim() && !nameRe.test(formData.emergency_contact_name.trim())) {
+    if (isChanged("emergency_contact_name") && formData.emergency_contact_name.trim() && !nameRe.test(formData.emergency_contact_name.trim())) {
       return "Emergency contact name may only contain letters, spaces, apostrophes, dots and hyphens.";
     }
-    if (formData.bank_account_no.trim() && !/^[0-9 \-]{4,50}$/.test(formData.bank_account_no.trim())) {
+    if (isChanged("bank_account_no") && formData.bank_account_no.trim() && !/^[0-9 \-]{4,50}$/.test(formData.bank_account_no.trim())) {
       return "Bank account number may only contain digits, spaces and dashes.";
     }
-    if (formData.date_of_birth) {
+    if (isChanged("date_of_birth") && formData.date_of_birth) {
       const today = new Date();
       const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
       if (formData.date_of_birth > todayStr) return "Date of birth cannot be in the future.";
@@ -152,7 +159,7 @@ export default function ProfileSettingsPage() {
     setIsLoading(true);
     setMsg({ text: "", type: "" });
 
-    const payload = {
+    const allFields = {
       first_name: formData.first_name,
       last_name: formData.last_name,
       phone_number: formData.phone_number,
@@ -170,6 +177,10 @@ export default function ProfileSettingsPage() {
       skills: formData.skills,
       qualifications: formData.qualifications,
     };
+    // Send only what was edited (the backend applies partial updates).
+    const payload = Object.fromEntries(
+      Object.entries(allFields).filter(([key]) => isChanged(key as keyof typeof formData))
+    );
 
     try {
       const res = await apiFetch("/auth/profile", {
