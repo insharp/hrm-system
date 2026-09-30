@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { Bell, Plus, Pencil, Trash2, X, Check } from "lucide-react";
 import { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, formatApiError } from "@/lib/api";
 import ModalPortal from "@/components/ModalPortal";
 import { useDialog } from "@/context/dialog-context";
 
@@ -60,7 +60,7 @@ export default function AnnouncementsWidget({ permissions }: Props) {
       const method = editItem ? "PUT" : "POST";
       const res = await apiFetch(endpoint, {
         method,
-        body: JSON.stringify({ title: formTitle, content: formContent })
+        body: JSON.stringify({ title: formTitle.trim(), content: formContent.trim() })
       });
       
       if (res.ok) {
@@ -69,7 +69,7 @@ export default function AnnouncementsWidget({ permissions }: Props) {
         load();
       } else {
         const err = await res.json();
-        await showAlert(err.detail || "Failed to save announcement", { title: "Couldn't save announcement" });
+        await showAlert(formatApiError(err.detail, "Failed to save announcement"), { title: "Couldn't save announcement" });
       }
     } catch (e) {
       console.error(e);
@@ -156,16 +156,16 @@ export default function AnnouncementsWidget({ permissions }: Props) {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
-                <input className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={formTitle} onChange={(e) => setFormTitle(e.target.value)} placeholder="Announcement title" />
+                <input className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={formTitle} onChange={(e) => setFormTitle(e.target.value)} maxLength={200} placeholder="Announcement title" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Content</label>
-                <textarea className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40 resize-none" rows={4} value={formContent} onChange={(e) => setFormContent(e.target.value)} placeholder="Write your announcement…" />
+                <textarea className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40 resize-none" rows={4} value={formContent} onChange={(e) => setFormContent(e.target.value)} maxLength={5000} placeholder="Write your announcement…" />
               </div>
             </div>
             <div className="flex justify-end gap-3 mt-6">
               <button onClick={() => setModalOpen(false)} className="text-sm font-medium text-gray-600 px-4 py-2">Cancel</button>
-              <button onClick={handleSave} disabled={saving || !formTitle.trim()} className="flex items-center gap-1.5 bg-[#F2924E] hover:bg-orange-500 disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
+              <button onClick={handleSave} disabled={saving || !formTitle.trim() || !formContent.trim()} className="flex items-center gap-1.5 bg-[#F2924E] hover:bg-orange-500 disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
                 <Check size={14} /> {saving ? "Saving…" : "Save"}
               </button>
             </div>

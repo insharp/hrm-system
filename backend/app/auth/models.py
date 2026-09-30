@@ -25,6 +25,14 @@ class User(Base, SoftDeleteMixin):
     password_hash = Column("hashed_password", String(255), nullable=False)  # DB col: hashed_password
     is_active = Column(Boolean, default=True)
     is_superadmin = Column(Boolean, default=False)
+    # Set when an account is created with an emailed temporary password. While
+    # true, the API only allows the first-login password change (see
+    # core/deps.get_current_user), so whoever can read the welcome email can't
+    # use the account.
+    must_change_password = Column(Boolean, default=False, server_default=text("false"), nullable=False)
+    # When the emailed temporary password stops working (naive UTC). NULL = no
+    # temporary password outstanding.
+    temp_password_expires_at = Column(DateTime, nullable=True)
     # is_deleted is provided by SoftDeleteMixin
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -78,4 +86,5 @@ class OTPRecord(Base):
     otp = Column(String, nullable=False)
     expires_at = Column(DateTime, nullable=False)
     verified = Column(Boolean, default=False)
+    attempts = Column(Integer, default=0, server_default=text("0"), nullable=False)  # wrong guesses so far
     created_at = Column(DateTime, default=datetime.utcnow)

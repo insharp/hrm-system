@@ -2,7 +2,8 @@
 
 import { CalendarDays, ChevronLeft, ChevronRight, Plus, Pencil, X, Check, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, formatApiError } from "@/lib/api";
+import { parseEventDate } from "@/lib/eventTime";
 import ModalPortal from "@/components/ModalPortal";
 import { useDialog } from "@/context/dialog-context";
 
@@ -79,8 +80,7 @@ export default function CalendarWidget({ permissions }: Props) {
 
   const eventMap = new Map<number, string[]>();
   events.forEach(ev => {
-    const ds = ev.event_date.endsWith("Z") ? ev.event_date.slice(0, -1) : ev.event_date;
-    const dt = new Date(ds);
+    const dt = parseEventDate(ev.event_date); // stored UTC → local calendar day
     if (dt.getFullYear() === year && dt.getMonth() === month) {
       const d = dt.getDate();
       eventMap.set(d, [...(eventMap.get(d) ?? []), ev.title]);
@@ -95,21 +95,17 @@ export default function CalendarWidget({ permissions }: Props) {
   const handleSaveHoliday = async () => {
     setSaving(true);
     try {
-      if (editHoliday) {
-        const res = await apiFetch(`/holidays/${editHoliday.id}`, { 
-          method: "PUT", 
-          body: JSON.stringify({ name: hName, date: hDate, is_mercantile: hMerc }) 
+      const body = JSON.stringify({ name: hName.trim(), date: hDate, is_mercantile: hMerc });
+      const res = editHoliday
+        ? await apiFetch(`/holidays/${editHoliday.id}`, { method: "PUT", body })
+        : await apiFetch("/holidays", { method: "POST", body });
+      if (!res.ok) {
+        // Keep the modal open so the user can correct the input.
+        const err = await res.json().catch(() => ({}));
+        await showAlert(formatApiError(err.detail, "Unknown error"), {
+          title: editHoliday ? "Failed to update holiday" : "Failed to save holiday",
         });
-        if (!res.ok) {
-          const err = await res.json();
-          await showAlert(err.detail || "Unknown error", { title: "Failed to update holiday" });
-        }
-      } else {
-        const res = await apiFetch("/holidays", { method: "POST", body: JSON.stringify({ name: hName, date: hDate, is_mercantile: hMerc }) });
-        if (!res.ok) {
-          const err = await res.json();
-          await showAlert(err.detail || "Unknown error", { title: "Failed to save holiday" });
-        }
+        return;
       }
       setModalOpen(false); setEditHoliday(null);
       load();
@@ -273,11 +269,11 @@ export default function CalendarWidget({ permissions }: Props) {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Holiday Name</label>
-                <input className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={hName} onChange={(e) => setHName(e.target.value)} placeholder="e.g. Sinhala New Year" />
+                <input className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={hName} onChange={(e) => setHName(e.target.value)} maxLength={100} placeholder="e.g. Sinhala New Year" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                <input type="date" className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={hDate} onChange={(e) => setHDate(e.target.value)} />
+                <input type="date" className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={hDate} min="2000-01-01" max="2100-12-31" onChange={(e) => setHDate(e.target.value)} />
               </div>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={hMerc} onChange={(e) => setHMerc(e.target.checked)} className="accent-[#F2924E]" />

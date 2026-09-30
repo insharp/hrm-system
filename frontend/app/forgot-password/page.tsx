@@ -15,17 +15,23 @@ export default function ForgotPassword() {
   const handleSubmit = async (e: any) => {
     e.preventDefault();
 
-    if (!email) {
+    const trimmed = email.trim().toLowerCase();
+    if (!trimmed) {
       await showAlert("Please enter your email.", { title: "Email required", tone: "warning" });
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+      await showAlert("Please enter a valid email address.", { title: "Invalid email", tone: "warning" });
       return;
     }
 
     setLoading(true);
 
     try {
-      await api.post("/auth/send-otp", { email });
-      sessionStorage.setItem("reset_email", email);
-      await showAlert("Check your inbox for the verification code.", {
+      await api.post("/auth/send-otp", { email: trimmed });
+      sessionStorage.setItem("reset_email", trimmed);
+      // Same wording whether or not the account exists (no account probing).
+      await showAlert("If an account exists for this email, a verification code is on its way.", {
         title: "OTP sent",
         tone: "success",
       });
@@ -52,6 +58,8 @@ export default function ForgotPassword() {
           focus:outline-none focus:ring-2 focus:ring-[#F2924E]"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          maxLength={255}
           required
         />
 

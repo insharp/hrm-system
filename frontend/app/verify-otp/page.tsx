@@ -27,6 +27,11 @@ export default function VerifyOTP() {
       return;
     }
 
+    if (!/^\d{6}$/.test(otp)) {
+      await showAlert("The verification code is 6 digits.", { title: "Invalid code", tone: "warning" });
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -53,7 +58,10 @@ export default function VerifyOTP() {
           text-[#1E293B] placeholder-[#D1D5DC]
           focus:outline-none focus:ring-2 focus:ring-[#F2924E]"
           value={otp}
-          onChange={(e) => setOtp(e.target.value)}
+          onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          maxLength={6}
           required
         />
 

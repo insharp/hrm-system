@@ -87,6 +87,16 @@ LOGIN_RATE_LIMIT: int = int(os.getenv("LOGIN_RATE_LIMIT", "5"))
 LOGIN_RATE_WINDOW_SECONDS: int = int(os.getenv("LOGIN_RATE_WINDOW_SECONDS", "60"))
 OTP_RATE_LIMIT: int = int(os.getenv("OTP_RATE_LIMIT", "5"))
 OTP_RATE_WINDOW_SECONDS: int = int(os.getenv("OTP_RATE_WINDOW_SECONDS", "300"))
+# Only honour X-Forwarded-For when the API sits behind a reverse proxy that SETS
+# it (nginx, a load balancer). Otherwise any client can send a fake header per
+# request and dodge the per-IP limits. Behind a proxy, set this to true — or
+# every user shares the proxy's IP and one person's typos lock out everyone.
+TRUST_PROXY_HEADERS: bool = _as_bool(os.getenv("TRUST_PROXY_HEADERS"), default=False)
+
+# ── First-login temporary passwords ───────────────────────────────────────────
+# How long an emailed temporary password stays usable before HR has to resend
+# login details (or the employee uses Forgot Password).
+TEMP_PASSWORD_EXPIRE_DAYS: int = max(1, int(os.getenv("TEMP_PASSWORD_EXPIRE_DAYS", "7")))
 
 # ── File Storage ──────────────────────────────────────────────────────────────
 UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads/cvs")

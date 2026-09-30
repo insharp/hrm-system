@@ -14,6 +14,25 @@ from app.employees import email as _email_module
 logger = logging.getLogger(__name__)
 
 
+def _issue_temporary_password(user: User) -> str:
+    """
+    Give `user` a fresh emailed-style temporary password and return it.
+
+    The account is forced through the first-login change (must_change_password),
+    the password expires after TEMP_PASSWORD_EXPIRE_DAYS, and every existing
+    session is revoked (refresh_token cleared).
+    """
+    from datetime import datetime, timedelta
+    from app.core.config import TEMP_PASSWORD_EXPIRE_DAYS
+
+    temp_password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
+    user.password_hash = hash_password(temp_password)
+    user.must_change_password = True
+    user.temp_password_expires_at = datetime.utcnow() + timedelta(days=TEMP_PASSWORD_EXPIRE_DAYS)
+    user.refresh_token = None
+    return temp_password
+
+
 def get_employees(db: Session, skip: int = 0, limit: int = 100):
     from sqlalchemy.orm import joinedload
     return db.query(Employee).options(
@@ -110,13 +129,9 @@ def create_employee(db: Session, employee: EmployeeCreate, background_tasks: Bac
         # live rows (WHERE is_deleted = false), so a new active record can reuse the
         # identifiers of a soft-deleted one. If an *active* row already holds them,
         # the insert raises IntegrityError, mapped to a friendly 400 below.
-        temp_password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
-        hashed = hash_password(temp_password)
-
         db_user = User(
             username=employee.email,
             email=employee.email,
-            password_hash=hashed,
             is_active=True,
             first_name=employee.first_name,
             last_name=employee.last_name,
@@ -127,6 +142,9 @@ def create_employee(db: Session, employee: EmployeeCreate, background_tasks: Bac
             emergency_contact_number=employee.emergency_contact_phone,
             position=employee.designation
         )
+        # The temporary password travels by email, so it must be replaced on
+        # first login before the account can be used (core/deps.py).
+        temp_password = _issue_temporary_password(db_user)
         db.add(db_user)
         db.flush()
 
@@ -257,7 +275,11 @@ def create_employee(db: Session, employee: EmployeeCreate, background_tasks: Bac
             logger.error(f"Notification failed for new employee: {e}")
 
         full_name = f"{db_employee.first_name} {db_employee.last_name}"
-        background_tasks.add_task(_email_module.send_welcome_email, db_employee.email, full_name, temp_password)
+        from app.core.config import TEMP_PASSWORD_EXPIRE_DAYS
+        background_tasks.add_task(
+            _email_module.send_welcome_email, db_employee.email, full_name, temp_password,
+            expires_days=TEMP_PASSWORD_EXPIRE_DAYS,
+        )
 
         return db_employee
 
@@ -496,6 +518,44 @@ def delete_employee(db: Session, employee_id: int) -> bool:
         db.commit()
         return True
     return False
+
+
+def resend_login_details(db: Session, employee_id: int, actor: User, background_tasks: BackgroundTasks) -> dict:
+    """
+    HR action: replace the employee's password with a new temporary one and
+    email it again — for a welcome email that never arrived, an expired
+    temporary password, or a locked-out employee.
+
+    The old password (temporary or not) stops working immediately and all of
+    the employee's sessions are revoked.
+    """
+    from app.core.config import TEMP_PASSWORD_EXPIRE_DAYS
+    from app.auth.models import AuditLog
+
+    db_employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    user = db_employee.user if db_employee else None
+    if not db_employee or not user:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    if user.is_active is False:
+        raise HTTPException(status_code=400, detail="This account is deactivated. Reactivate it first.")
+    # Resetting a super admin's password is itself a privileged act.
+    if user.is_superadmin and not actor.is_superadmin:
+        raise HTTPException(status_code=403, detail="Only a super admin can reset another super admin's login.")
+    if user.id == actor.id:
+        raise HTTPException(status_code=400, detail="Use Security Settings to change your own password.")
+
+    temp_password = _issue_temporary_password(user)
+    db.add(AuditLog(user_id=user.id, action=f"LOGIN_DETAILS_RESENT_BY:{actor.id}"))
+    db.commit()
+
+    full_name = f"{db_employee.first_name} {db_employee.last_name}".strip()
+    background_tasks.add_task(
+        _email_module.send_welcome_email, user.email, full_name, temp_password,
+        expires_days=TEMP_PASSWORD_EXPIRE_DAYS,
+    )
+    return {
+        "message": f"New login details sent to {user.email}. They expire in {TEMP_PASSWORD_EXPIRE_DAYS} days.",
+    }
 
 
 def deactivate_employee(db: Session, employee_id: int) -> dict:

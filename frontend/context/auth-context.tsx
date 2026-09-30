@@ -1,8 +1,8 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
-import { usePathname } from "next/navigation";
-import { apiFetch, getToken, removeToken, setToken, handleRefreshFlow, refreshAccessToken } from "@/lib/api";
+import { usePathname, useRouter } from "next/navigation";
+import { apiFetch, getToken, removeToken, setToken, handleRefreshFlow, refreshAccessToken, CHANGE_PASSWORD_PATH } from "@/lib/api";
 
 // ── Module-level constants ──────────────────────────────────────────────────────
 /** How often the background token refresh fires (minutes). */
@@ -26,6 +26,8 @@ export interface User {
   department?: string;
   profile_image_url?: string;
   two_factor_enabled?: boolean;
+  /** True until a new employee replaces their emailed temporary password. */
+  must_change_password?: boolean;
   notification_preferences?: Record<string, { email: boolean; inApp: boolean }>;
   // Days to keep notifications; null/undefined = never auto-delete.
   notification_retention_days?: number | null;
@@ -47,6 +49,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const pathname = usePathname();
+  const router = useRouter();
 
   /**
    * Fetches the current user's profile from /auth/me.
@@ -114,6 +117,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 
   const lastRefreshTimeRef = useRef<number>(Date.now());
+
+  /**
+   * First login with an emailed temporary password: keep the user on the
+   * change-password screen until they set their own. (The API refuses every
+   * other call anyway — this just avoids a screen full of errors.)
+   */
+  useEffect(() => {
+    if (user?.must_change_password && pathname !== CHANGE_PASSWORD_PATH) {
+      router.replace(CHANGE_PASSWORD_PATH);
+    }
+  }, [user, pathname, router]);
 
   /** Runs once on mount to restore the user session from the stored access token. */
   useEffect(() => { 

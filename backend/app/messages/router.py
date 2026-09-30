@@ -17,58 +17,6 @@ can_receive = require_permission("messaging.receive")
 can_message = require_any_permission("messaging.receive", "messaging.send")
 
 
-# ── GET message groups ──────────────────────────────────────────────────────────
-@router.get("/groups")
-def list_groups(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("messaging.send")),
-):
-    """Return all custom message groups (used by the compose dropdown — senders only)."""
-    groups = db.query(models.MessageGroup).order_by(models.MessageGroup.name).all()
-    return [{"id": g.id, "name": g.name} for g in groups]
-
-
-# ── POST create group (superadmin only) ─────────────────────────────────────────
-@router.post("/groups")
-def create_group(
-    payload: dict,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Create a new custom message group. Requires superadmin."""
-    if not getattr(current_user, "is_superadmin", False):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin only")
-    name = (payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Group name is required")
-    existing = db.query(models.MessageGroup).filter(models.MessageGroup.name == name).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="A group with that name already exists")
-    group = models.MessageGroup(name=name, created_by=current_user.id)
-    db.add(group)
-    db.commit()
-    db.refresh(group)
-    return {"id": group.id, "name": group.name}
-
-
-# ── DELETE group (superadmin only) ──────────────────────────────────────────────
-@router.delete("/groups/{group_id}")
-def delete_group(
-    group_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Delete a custom message group. Requires superadmin."""
-    if not getattr(current_user, "is_superadmin", False):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin only")
-    group = db.query(models.MessageGroup).filter(models.MessageGroup.id == group_id).first()
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    db.delete(group)
-    db.commit()
-    return {"deleted": True}
-
-
 # ── POST send message ───────────────────────────────────────────────────────────
 @router.post("/", response_model=schemas.MessageResponse)
 def send_message(
@@ -90,19 +38,9 @@ def send_message(
             detail="You don't have permission to send messages"
         )
 
-    # Create Message record
-    db_message = models.Message(
-        sender_id=current_user.id,
-        subject=message.subject,
-        content=message.content,
-        target_group=message.target_group,
-    )
-    db.add(db_message)
-    db.commit()
-    db.refresh(db_message)
-
-    # Determine recipients based on target_group
-    recipients_query = db.query(User)
+    # Determine recipients based on target_group — BEFORE saving anything, so a
+    # message that would reach nobody is refused instead of silently vanishing.
+    recipients_query = db.query(User.id).filter(User.id != current_user.id)
     if message.target_group == "All":
         pass  # All users
     elif message.target_group == "All Employees":
@@ -112,21 +50,40 @@ def send_message(
         # Dynamically filter users who have the "HR" role
         recipients_query = recipients_query.filter(User.roles.any(Role.role_name == "HR"))
     else:
-        # Specific department name
+        from app.departments.models import Department
+        if not db.query(Department.id).filter(Department.name == message.target_group).first():
+            # Only the built-in groups and real departments can be delivered
+            # to (custom message groups were removed — they had no members).
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"'{message.target_group}' is not a group messages can be delivered to.",
+            )
         recipients_query = recipients_query.filter(User.department == message.target_group)
 
-    # Create MessageRecipient record for EACH recipient — but NOT for the sender
-    recipients = recipients_query.all()
-    for recipient in recipients:
-        if recipient.id == current_user.id:
-            continue
-        db_recipient = models.MessageRecipient(
-            message_id=db_message.id,
-            recipient_id=recipient.id
+    recipient_ids = [uid for (uid,) in recipients_query.filter(
+        (User.is_active == True) | (User.is_active.is_(None))
+    ).all()]
+    if not recipient_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nobody is in the selected group yet, so the message was not sent.",
         )
-        db.add(db_recipient)
-    
+
+    # Message + all recipient rows commit together (no orphan messages).
+    db_message = models.Message(
+        sender_id=current_user.id,
+        subject=message.subject,
+        content=message.content,
+        target_group=message.target_group,
+    )
+    db.add(db_message)
+    db.flush()
+    db.add_all(
+        models.MessageRecipient(message_id=db_message.id, recipient_id=uid)
+        for uid in recipient_ids
+    )
     db.commit()
+    db.refresh(db_message)
     
     return {
         "id": db_message.id,
@@ -362,6 +319,9 @@ def restore_message(
 
     if message_rec:
         message_rec.sender_deleted = False
+
+    if not recipient_rec and not message_rec:
+        raise HTTPException(status_code=404, detail="Message not found")
 
     db.commit()
     return {"message": "Message restored"}

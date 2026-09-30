@@ -3,11 +3,26 @@ auth/service.py — Authentication logic only.
 Role/Permission management has moved to roles/service.py.
 """
 from typing import Optional, List
-from datetime import timedelta
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.auth.models import User
 from app.core.security import verify_password
 from app.core.jwt import create_access_token, create_refresh_token
+
+class TemporaryPasswordExpired(Exception):
+    """Correct temporary password, but past its expiry — no session is issued."""
+
+
+TEMP_PASSWORD_EXPIRED_MESSAGE = (
+    "Your temporary password has expired. Ask HR to resend your login details, "
+    "or use Forgot Password to set a new password."
+)
+
+
+def temp_password_expired(user: User) -> bool:
+    expires = getattr(user, "temp_password_expires_at", None)
+    return bool(user.must_change_password and isinstance(expires, datetime) and datetime.utcnow() > expires)
+
 
 # ── User lookup helpers ───────────────────────────────────────────────────────
 
@@ -77,6 +92,11 @@ def authenticate_user(db: Session, identifier: str, password: str) -> Optional[d
     # that the account merely exists-but-is-disabled (prevents enumeration).
     if user.is_active is False:
         return None
+
+    # Checked only AFTER the password matched, so it can't be used to probe
+    # which accounts exist.
+    if temp_password_expired(user):
+        raise TemporaryPasswordExpired()
 
     access_token = create_access_token({"sub": str(user.id)})
     refresh_token = create_refresh_token({"sub": str(user.id)})

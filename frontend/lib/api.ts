@@ -40,6 +40,43 @@ export function removeToken(): void {
   document.cookie = "access_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC";
 }
 
+/**
+ * Turn a FastAPI error `detail` into one readable sentence. Validation errors
+ * (422) arrive as a list of objects — rendering that list directly in JSX
+ * throws, so pages should always pass `detail` through here.
+ */
+export function formatApiError(detail: unknown, fallback = "Something went wrong."): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((d: { msg?: unknown } | null) => (typeof d?.msg === "string" ? d.msg.replace(/^Value error, /, "") : null))
+      .filter(Boolean);
+    return msgs.length ? msgs.join(" ") : fallback;
+  }
+  return fallback;
+}
+
+/** 403 detail the backend returns while a first-login password change is pending. */
+export const PASSWORD_CHANGE_REQUIRED = "PASSWORD_CHANGE_REQUIRED";
+export const CHANGE_PASSWORD_PATH = "/change-password";
+
+/**
+ * If the backend refused a call because the user still has to replace their
+ * emailed temporary password, send them to the change-password screen.
+ */
+async function redirectIfPasswordChangeRequired(response: Response): Promise<void> {
+  if (response.status !== 403 || typeof window === "undefined") return;
+  if (window.location.pathname === CHANGE_PASSWORD_PATH) return;
+  try {
+    const data = await response.clone().json();
+    if (data?.detail === PASSWORD_CHANGE_REQUIRED) {
+      window.location.href = CHANGE_PASSWORD_PATH;
+    }
+  } catch {
+    /* not JSON — not our signal */
+  }
+}
+
 function isTokenExpiringSoon(token: string): boolean {
   try {
     const payload = JSON.parse(atob(token.split('.')[1]));
@@ -143,6 +180,8 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     }
   }
 
+  await redirectIfPasswordChangeRequired(response);
+
   if (!response.ok) {
     let errorMessage = `API Request failed: ${response.status}`;
     try {
@@ -235,11 +274,14 @@ export async function apiFetch(url: string, options: RequestInit = {}): Promise<
     try {
       const newToken = await handleRefreshFlow();
       const newHeaders = { ...headers, Authorization: `Bearer ${newToken}` };
-      return fetch(`${API_BASE_URL}${url}`, { ...options, headers: newHeaders, credentials: "include" });
+      const retried = await fetch(`${API_BASE_URL}${url}`, { ...options, headers: newHeaders, credentials: "include" });
+      await redirectIfPasswordChangeRequired(retried);
+      return retried;
     } catch (err) {
       throw err;
     }
   }
 
+  await redirectIfPasswordChangeRequired(response);
   return response;
 }

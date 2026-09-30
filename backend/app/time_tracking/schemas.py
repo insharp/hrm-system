@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictFloat, StrictInt
 from typing import Optional, List
 from datetime import datetime
 
@@ -60,6 +60,12 @@ class WeeklyStatsResponse(BaseModel):
     overtime_hours: float
     overtime_threshold: float = 8.0            # current effective threshold
     entries: List[DayEntryResponse] = []       # day-grouped
+
+
+class OvertimeThresholdUpdate(BaseModel):
+    # Strict types: plain bool/str ("8") are rejected instead of coerced
+    # (True used to be accepted as 1 hour).
+    threshold_hours: StrictFloat | StrictInt = Field(..., gt=0, le=24)
 
 
 class OvertimeThresholdResponse(BaseModel):

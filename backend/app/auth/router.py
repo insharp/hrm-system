@@ -1,6 +1,8 @@
 import os
-import random
-import time
+import re
+import hmac
+import secrets
+import logging
 import qrcode
 import base64
 from io import BytesIO
@@ -13,11 +15,17 @@ from jose import jwt, JWTError
 from app.database.database import get_db
 from app.auth.schemas import (
     LoginRequest, TokenResponse, UserResponse,
-    UserProfileUpdate, UserPasswordUpdate, UserNotificationUpdate
+    UserProfileUpdate, UserPasswordUpdate, UserNotificationUpdate,
+    FirstLoginPasswordChange, SendOtpRequest, VerifyOtpRequest, ResetPasswordRequest,
+    TwoFactorLoginRequest, TwoFactorCodeRequest, TwoFactorDisableRequest,
 )
 from app.core.security import SECRET_KEY, ALGORITHM, create_access_token, hash_password, verify_password
 from app.core.deps import get_current_user, get_user_permissions
-from app.auth.service import authenticate_user, get_user_by_email
+from app.core.password_policy import validate_password_or_raise
+from app.auth.service import (
+    authenticate_user, get_user_by_email,
+    TemporaryPasswordExpired, TEMP_PASSWORD_EXPIRED_MESSAGE, temp_password_expired,
+)
 from app.auth.models import User, AuditLog, OTPRecord
 from app.core.email import send_otp_email
 from app.core.config import (
@@ -29,14 +37,42 @@ from app.core.rate_limit import enforce_rate_limit
 
 router = APIRouter()
 security = HTTPBearer()
+logger = logging.getLogger(__name__)
 
 # ── Environment Configuration ────────────────────────────────────────────────
 OTP_EXPIRE_SECONDS = int(os.getenv("OTP_EXPIRE_SECONDS", "300"))
 
 # ── Module-level constants ─────────────────────────────────────────────────────
-MIN_PASSWORD_LENGTH = 8     # Minimum number of characters for a valid password
-OTP_MIN_VALUE = 100_000     # Smallest 6-digit OTP value
-OTP_MAX_VALUE = 999_999     # Largest 6-digit OTP value
+OTP_LENGTH = 6              # Digits in a password-reset OTP / TOTP code
+OTP_MAX_ATTEMPTS = 5        # Wrong guesses before a reset OTP is burned
+CODE_RE = re.compile(r"^\d{6}$")
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    from app.core.jwt import REFRESH_TOKEN_EXPIRE_DAYS
+    response.set_cookie(
+        key="refresh_token", value=refresh_token, httponly=True, secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE, max_age=60 * 60 * 24 * REFRESH_TOKEN_EXPIRE_DAYS, path="/"
+    )
+
+
+def _start_new_session(user: User, response: Response, db: Session) -> str:
+    """
+    Issue a fresh access + refresh pair for this browser and make it the ONLY
+    valid refresh token for the user (one refresh token is stored per user), so
+    every other browser is signed out at its next /refresh. Returns the access token.
+    """
+    from app.core.jwt import create_refresh_token
+    refresh = create_refresh_token({"sub": str(user.id)})
+    user.refresh_token = refresh
+    db.commit()
+    _set_refresh_cookie(response, refresh)
+    return create_access_token({"sub": str(user.id)})
+
+
+def _user_names(user: User) -> tuple:
+    return (user.first_name, user.last_name, user.username if user.username != user.email else None)
 
 # ---------------- LOGIN ----------------
 
@@ -59,7 +95,12 @@ def login(data: LoginRequest, request: Request, response: Response, db: Session 
     if not identifier:
         raise HTTPException(status_code=400, detail="Email or username required")
 
-    token = authenticate_user(db, identifier, data.password)
+    try:
+        token = authenticate_user(db, identifier, data.password)
+    except TemporaryPasswordExpired:
+        db.add(AuditLog(action="LOGIN_TEMP_PASSWORD_EXPIRED", ip_address=client_ip))
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=TEMP_PASSWORD_EXPIRED_MESSAGE)
     if not token:
         audit_log = AuditLog(action="LOGIN_FAILED", ip_address=client_ip)
         db.add(audit_log)
@@ -95,12 +136,15 @@ def login(data: LoginRequest, request: Request, response: Response, db: Session 
 
     return {
         "access_token": token["access_token"],
-        "token_type": "bearer"
+        "token_type": "bearer",
+        # Tells the client to go straight to the first-login password screen;
+        # the API enforces it regardless (core/deps.get_current_user).
+        "must_change_password": bool(user.must_change_password),
     }
 
 
 @router.post("/login/2fa")
-def login_2fa(data: dict, request: Request, response: Response, db: Session = Depends(get_db)):
+def login_2fa(data: TwoFactorLoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     """
     Complete the second step of two-factor authentication.
     Validates the TOTP code against the user's stored secret.
@@ -108,8 +152,12 @@ def login_2fa(data: dict, request: Request, response: Response, db: Session = De
     """
     enforce_rate_limit(request, "login_2fa", LOGIN_RATE_LIMIT, LOGIN_RATE_WINDOW_SECONDS)
 
-    temp_token = data.get("temp_token")
-    code = data.get("code")
+    temp_token = data.temp_token
+    code = (data.code or "").strip()
+    if not temp_token:
+        raise HTTPException(401, "Invalid temporary token")
+    if not CODE_RE.match(code):
+        raise HTTPException(400, f"Enter the {OTP_LENGTH}-digit code from your authenticator app")
 
     try:
         payload = jwt.decode(temp_token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -135,16 +183,19 @@ def login_2fa(data: dict, request: Request, response: Response, db: Session = De
     if not pyotp.TOTP(user.totp_secret).verify(code):
         raise HTTPException(400, "Invalid 2FA code")
 
-    from app.core.jwt import REFRESH_TOKEN_EXPIRE_DAYS
-    access_token = create_access_token({"sub": str(user.id)})
-    from app.core.jwt import create_refresh_token
-    refresh_token = create_refresh_token({"sub": str(user.id)})
+    # The refresh token MUST be persisted: /refresh rejects any cookie that
+    # doesn't match users.refresh_token, so an unsaved one silently logged 2FA
+    # users out as soon as their 15-minute access token expired.
+    access_token = _start_new_session(user, response, db)
 
-    response.set_cookie(
-        key="refresh_token", value=refresh_token, httponly=True, secure=COOKIE_SECURE,
-        samesite=COOKIE_SAMESITE, max_age=60 * 60 * 24 * REFRESH_TOKEN_EXPIRE_DAYS, path="/"
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+    client_ip = request.client.host if request.client else "Unknown"
+    db.add(AuditLog(user_id=user.id, action="LOGIN_SUCCESS", ip_address=client_ip))
+    db.commit()
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "must_change_password": bool(user.must_change_password),
+    }
 
 
 # ---------------- REFRESH TOKEN ----------------
@@ -164,10 +215,14 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
     try:
         payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
-        
+        if payload.get("type") != "refresh" or user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+
         user = db.query(User).filter(User.id == int(user_id)).first()
-        
-        if not user or user.refresh_token != refresh_token:
+
+        # Deactivated accounts lose their session at the next refresh rather
+        # than being able to renew it forever.
+        if not user or user.is_active is False or user.refresh_token != refresh_token:
             raise HTTPException(status_code=401, detail="Invalid refresh token")
             
         from app.core.jwt import create_refresh_token, REFRESH_TOKEN_EXPIRE_DAYS
@@ -217,25 +272,31 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 # ---------------- SEND OTP ----------------
 
 @router.post("/send-otp")
-def send_otp(data: dict, request: Request, db: Session = Depends(get_db)):
+def send_otp(data: SendOtpRequest, request: Request, db: Session = Depends(get_db)):
     """
     Generate a 6-digit OTP for the given email and send it via email.
     Any existing OTP records for that email are deleted first to prevent reuse.
     The OTP expires after OTP_EXPIRE_SECONDS (default 300 s / 5 min).
+
+    Always answers the same way whether or not the account exists, so this
+    endpoint can't be used to discover which emails have accounts.
     """
     enforce_rate_limit(request, "send_otp", OTP_RATE_LIMIT, OTP_RATE_WINDOW_SECONDS)
 
-    email = data.get("email")
+    email = (data.email or "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
+    if not EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
 
-    email = email.strip().lower()
+    generic = {"message": "If an account exists for this email, a verification code has been sent."}
+
     user = get_user_by_email(db, email)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    if not user or user.is_active is False:
+        return generic
 
-    # Generate OTP
-    otp = str(random.randint(OTP_MIN_VALUE, OTP_MAX_VALUE))
+    # secrets, not random: the OTP is a credential and must be unpredictable.
+    otp = f"{secrets.randbelow(10 ** OTP_LENGTH):0{OTP_LENGTH}d}"
     expires_at = datetime.utcnow() + timedelta(seconds=OTP_EXPIRE_SECONDS)
 
     # Save to DB (cleanup old ones for this email first)
@@ -245,35 +306,45 @@ def send_otp(data: dict, request: Request, db: Session = Depends(get_db)):
     db.commit()
 
     send_otp_email(email, otp)
-    return {"message": "OTP sent successfully"}
+    return generic
 
 
 # ---------------- VERIFY OTP ----------------
 
 @router.post("/verify-otp")
-def verify_otp(data: dict, request: Request, db: Session = Depends(get_db)):
+def verify_otp(data: VerifyOtpRequest, request: Request, db: Session = Depends(get_db)):
     """
     Verify the OTP submitted by the user against the stored record.
     Marks the record as verified so the reset-password endpoint can proceed.
-    Returns 400 if the OTP is incorrect or has expired.
+    Returns 400 if the OTP is incorrect or has expired. After OTP_MAX_ATTEMPTS
+    wrong guesses the code is burned and a new one must be requested.
     """
     enforce_rate_limit(request, "verify_otp", OTP_RATE_LIMIT, OTP_RATE_WINDOW_SECONDS)
 
-    email = data.get("email")
-    otp = data.get("otp")
+    email = (data.email or "").strip().lower()
+    otp = (data.otp or "").strip()
     if not email or not otp:
         raise HTTPException(status_code=400, detail="Email and OTP required")
+    if not CODE_RE.match(otp):
+        raise HTTPException(status_code=400, detail=f"The code must be {OTP_LENGTH} digits")
 
-    email = email.strip().lower()
-    record = db.query(OTPRecord).filter(OTPRecord.email == email, OTPRecord.otp == otp).first()
-    
+    record = db.query(OTPRecord).filter(OTPRecord.email == email).first()
     if not record:
         raise HTTPException(status_code=400, detail="Invalid OTP")
-    
+
     if datetime.utcnow() > record.expires_at:
         db.delete(record)
         db.commit()
         raise HTTPException(status_code=400, detail="OTP expired")
+
+    if not hmac.compare_digest(record.otp, otp):
+        record.attempts = (record.attempts or 0) + 1
+        if record.attempts >= OTP_MAX_ATTEMPTS:
+            db.delete(record)
+            db.commit()
+            raise HTTPException(status_code=400, detail="Too many incorrect attempts. Please request a new code.")
+        db.commit()
+        raise HTTPException(status_code=400, detail="Invalid OTP")
 
     record.verified = True
     db.commit()
@@ -283,7 +354,7 @@ def verify_otp(data: dict, request: Request, db: Session = Depends(get_db)):
 # ---------------- RESET PASSWORD ----------------
 
 @router.post("/reset-password")
-def reset_password(data: dict, request: Request, db: Session = Depends(get_db)):
+def reset_password(data: ResetPasswordRequest, request: Request, db: Session = Depends(get_db)):
     """
     Reset the user's password after a successful OTP verification.
     Requires a verified (and non-expired) OTP record for the email.
@@ -291,17 +362,16 @@ def reset_password(data: dict, request: Request, db: Session = Depends(get_db)):
     """
     enforce_rate_limit(request, "reset_password", OTP_RATE_LIMIT, OTP_RATE_WINDOW_SECONDS)
 
-    email = data.get("email")
-    new_password = data.get("password")
+    email = (data.email or "").strip().lower()
+    new_password = data.password
     if not email or not new_password:
         raise HTTPException(status_code=400, detail="Email and password required")
 
-    email = email.strip().lower()
     record = db.query(OTPRecord).filter(OTPRecord.email == email, OTPRecord.verified == True).first()
-    
+
     if not record:
         raise HTTPException(status_code=403, detail="OTP verification required")
-    
+
     if datetime.utcnow() > record.expires_at:
         db.delete(record)
         db.commit()
@@ -311,7 +381,15 @@ def reset_password(data: dict, request: Request, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    validate_password_or_raise(new_password, email=user.email, names=_user_names(user))
+    if verify_password(new_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="New password must be different from your current password.")
+
     user.password_hash = hash_password(new_password)
+    # Proving control of the mailbox is enough to also satisfy a pending
+    # first-login change — the user has now chosen their own password.
+    user.must_change_password = False
+    user.temp_password_expires_at = None
     # Invalidate all other active sessions after a password reset: clearing the
     # stored refresh_token forces every other browser to re-authenticate on its
     # next /refresh (aligns with logout, which also nulls refresh_token).
@@ -455,24 +533,71 @@ def upload_profile_image(
     return {"profile_image_url": resolve_public_url(current_user.profile_image_url)}
 
 
+@router.post("/first-login/password")
+def first_login_change_password(
+    data: FirstLoginPasswordChange,
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Replace the emailed temporary password on first login (mandatory).
+
+    Only callable while must_change_password is set. The new password must meet
+    the policy and differ from the temporary one. Every other session — e.g.
+    someone else who also read the welcome email and logged in — is revoked,
+    and this browser gets a fresh token pair.
+    """
+    if not current_user.must_change_password:
+        raise HTTPException(status_code=400, detail="Your password has already been set. Use Security Settings to change it.")
+    # A session opened before the deadline must not outlive it.
+    if temp_password_expired(current_user):
+        raise HTTPException(status_code=403, detail=TEMP_PASSWORD_EXPIRED_MESSAGE)
+    if data.new_password != data.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match.")
+    validate_password_or_raise(data.new_password, email=current_user.email, names=_user_names(current_user))
+    if verify_password(data.new_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Your new password must be different from the temporary password.")
+
+    current_user.password_hash = hash_password(data.new_password)
+    current_user.must_change_password = False
+    current_user.temp_password_expires_at = None
+    access_token = _start_new_session(current_user, response, db)
+
+    try:
+        from app.notifications.service import notify_user
+        notify_user(
+            db, current_user.id,
+            "Your password was set successfully. Welcome aboard!",
+            category="security", type="success", link="/dashboard/settings/security",
+            entity_type="user", entity_id=str(current_user.id),
+        )
+        db.commit()
+    except Exception as e:
+        logger.error(f"[Auth] Notification failed for first-login password change: {e}")
+    return {"access_token": access_token, "token_type": "bearer", "message": "Password updated successfully"}
+
+
 @router.put("/security/password")
 def change_password(
     data: UserPasswordUpdate,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     Change the authenticated user's password.
-    Verifies the current password before accepting the new one.
-    Enforces a minimum length of 8 characters.
+    Verifies the current password, enforces the password policy, and signs out
+    every other session (this browser keeps working via a rotated refresh cookie).
     """
     if not verify_password(data.current_password, current_user.password_hash):
         raise HTTPException(status_code=400, detail="Incorrect current password")
-    if len(data.new_password) < MIN_PASSWORD_LENGTH:
-        raise HTTPException(status_code=400, detail=f"New password must be at least {MIN_PASSWORD_LENGTH} characters")
+    validate_password_or_raise(data.new_password, email=current_user.email, names=_user_names(current_user))
+    if data.new_password == data.current_password:
+        raise HTTPException(status_code=400, detail="New password must be different from your current password.")
 
     current_user.password_hash = hash_password(data.new_password)
-    db.commit()
+    _start_new_session(current_user, response, db)
 
     # ── Notify user ────────────────────────────────────────────────
     try:
@@ -501,7 +626,11 @@ def setup_two_factor(
     authenticator app to scan.
     """
     import pyotp
-    import urllib.parse
+
+    # Once 2FA is on, the secret must never be handed out again — otherwise
+    # anyone holding a session could clone the user's authenticator.
+    if current_user.two_factor_enabled:
+        raise HTTPException(status_code=400, detail="Two-factor authentication is already enabled")
 
     if not current_user.totp_secret:
         current_user.totp_secret = pyotp.random_base32()
@@ -523,7 +652,7 @@ def setup_two_factor(
 
 @router.post("/security/2fa/verify", response_model=UserResponse)
 def verify_and_enable_two_factor(
-    data: dict,
+    data: TwoFactorCodeRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -531,7 +660,9 @@ def verify_and_enable_two_factor(
     Confirm that the user's authenticator app is correctly configured
     by verifying a live TOTP code, then enable 2FA on the account.
     """
-    code = data.get("code")
+    code = (data.code or "").replace(" ", "")
+    if not CODE_RE.match(code):
+        raise HTTPException(status_code=400, detail=f"Enter the {OTP_LENGTH}-digit code from your authenticator app")
     import pyotp
     if not current_user.totp_secret or not pyotp.TOTP(current_user.totp_secret).verify(code):
         raise HTTPException(status_code=400, detail="Invalid verification code")
@@ -558,13 +689,18 @@ def verify_and_enable_two_factor(
 
 @router.delete("/security/2fa", response_model=UserResponse)
 def disable_two_factor(
+    data: TwoFactorDisableRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     Disable two-factor authentication for the current user.
+    Requires the account password, so a hijacked or unattended session can't
+    silently strip the second factor.
     Clears the stored TOTP secret so 2FA cannot be used until re-enrolled.
     """
+    if not data.password or not verify_password(data.password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Incorrect password")
     current_user.two_factor_enabled = False
     current_user.totp_secret = None
     db.commit()
@@ -596,7 +732,7 @@ def update_notifications(
     Update the current user's notification preferences.
     Stored directly on the user record for use by the notification system.
     """
-    current_user.notification_preferences = data.notification_preferences
+    current_user.notification_preferences = data.model_dump()["notification_preferences"]
     # None is a real choice here ("never auto-delete"), not a missing value.
     current_user.notification_retention_days = data.notification_retention_days
 

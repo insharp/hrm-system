@@ -4,6 +4,7 @@ from sqlalchemy import func, case
 from typing import List, Optional
 from datetime import datetime
 import os
+import hmac
 
 from app.database.database import get_db
 from app.core.deps import get_current_user
@@ -364,9 +365,16 @@ def internal_push(
     Internal endpoint for other modules to trigger notifications.
     Requires X-Internal-Key header.
     """
-    internal_key = os.getenv("INTERNAL_API_KEY", "hrm-internal-2024")
-    if x_internal_key != internal_key:
+    # No built-in default: a key committed to the repo is public, and would let
+    # anyone push official-looking notifications (with links) to any user.
+    # Unset INTERNAL_API_KEY = endpoint disabled.
+    internal_key = os.getenv("INTERNAL_API_KEY", "")
+    if not internal_key:
+        raise HTTPException(status_code=503, detail="Internal notifications are not configured")
+    if not x_internal_key or not hmac.compare_digest(x_internal_key, internal_key):
         raise HTTPException(status_code=403, detail="Invalid internal key")
+    if not db.query(User.id).filter(User.id == data.user_id).first():
+        raise HTTPException(status_code=404, detail="User not found")
 
     notif = Notification(
         user_id=data.user_id,

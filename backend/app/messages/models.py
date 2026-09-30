@@ -29,7 +29,12 @@ class MessageRecipient(Base):
 
 
 class MessageGroup(Base):
-    """Custom messaging groups created by superadmin."""
+    """
+    Legacy: custom messaging groups (superadmin-created). The feature was
+    removed because groups never had members, so messages sent to one
+    reached nobody. The model is kept only so the existing message_groups
+    table and its migrations stay untouched; nothing reads or writes it.
+    """
     __tablename__ = "message_groups"
 
     id = Column(Integer, primary_key=True, index=True)

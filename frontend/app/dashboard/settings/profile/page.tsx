@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { User, Upload, Mail, Hash, Briefcase, Edit2, X, Phone, MapPin, Calendar, CreditCard, Award, HeartPulse } from "lucide-react";
-import { apiFetch, fileUrl } from "@/lib/api";
+import { apiFetch, fileUrl, formatApiError } from "@/lib/api";
 
 const InfoItem = ({ label, value, icon: Icon }: { label: string, value: string, icon?: any }) => (
   <div className="flex flex-col p-4 bg-gray-50/50 rounded-xl border border-gray-100 h-full">
@@ -110,12 +110,56 @@ export default function ProfileSettingsPage() {
     setMsg({ text: "", type: "" });
   };
 
+  /**
+   * True when the user edited this field. Only edited fields are validated and
+   * sent, so data saved before the validation rules existed (e.g. an old phone
+   * format) never blocks saving an unrelated change.
+   */
+  const isChanged = (key: keyof typeof formData) => !originalData || formData[key] !== originalData[key];
+
+  /** Mirrors backend UserProfileUpdate validation so mistakes show instantly. */
+  const validateProfile = (): string | null => {
+    const nameRe = /^[\p{L}]+(?:[ .'\-]+[\p{L}]+)*\.?$/u;
+    const phoneRe = /^\+?[0-9\s\-()]{7,15}$/;
+    const first = formData.first_name.trim();
+    const last = formData.last_name.trim();
+    if (isChanged("first_name") && !first) return "First name is required.";
+    if (isChanged("last_name") && !last) return "Last name is required.";
+    if ((isChanged("first_name") && !nameRe.test(first)) || (isChanged("last_name") && !nameRe.test(last))) {
+      return "Names may only contain letters, spaces, apostrophes, dots and hyphens.";
+    }
+    if (isChanged("phone_number") && formData.phone_number.trim() && !phoneRe.test(formData.phone_number.trim())) {
+      return "Please enter a valid phone number.";
+    }
+    if (isChanged("emergency_contact_number") && formData.emergency_contact_number.trim() && !phoneRe.test(formData.emergency_contact_number.trim())) {
+      return "Please enter a valid emergency contact number.";
+    }
+    if (isChanged("emergency_contact_name") && formData.emergency_contact_name.trim() && !nameRe.test(formData.emergency_contact_name.trim())) {
+      return "Emergency contact name may only contain letters, spaces, apostrophes, dots and hyphens.";
+    }
+    if (isChanged("bank_account_no") && formData.bank_account_no.trim() && !/^[0-9 \-]{4,50}$/.test(formData.bank_account_no.trim())) {
+      return "Bank account number may only contain digits, spaces and dashes.";
+    }
+    if (isChanged("date_of_birth") && formData.date_of_birth) {
+      const today = new Date();
+      const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      if (formData.date_of_birth > todayStr) return "Date of birth cannot be in the future.";
+      if (formData.date_of_birth < "1900-01-01") return "Please enter a realistic date of birth.";
+    }
+    return null;
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    const problem = validateProfile();
+    if (problem) {
+      setMsg({ text: problem, type: "error" });
+      return;
+    }
     setIsLoading(true);
     setMsg({ text: "", type: "" });
 
-    const payload = {
+    const allFields = {
       first_name: formData.first_name,
       last_name: formData.last_name,
       phone_number: formData.phone_number,
@@ -133,6 +177,10 @@ export default function ProfileSettingsPage() {
       skills: formData.skills,
       qualifications: formData.qualifications,
     };
+    // Send only what was edited (the backend applies partial updates).
+    const payload = Object.fromEntries(
+      Object.entries(allFields).filter(([key]) => isChanged(key as keyof typeof formData))
+    );
 
     try {
       const res = await apiFetch("/auth/profile", {
@@ -147,7 +195,7 @@ export default function ProfileSettingsPage() {
         setTimeout(() => setMsg({ text: "", type: "" }), 3500);
       } else {
         const errData = await res.json();
-        setMsg({ text: errData.detail || "Failed to update profile", type: "error" });
+        setMsg({ text: formatApiError(errData.detail, "Failed to update profile"), type: "error" });
       }
     } catch (err) {
       console.error(err);
@@ -386,19 +434,19 @@ export default function ProfileSettingsPage() {
                 <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-5">
                   <div>
                     <label className={labelClass}>First Name</label>
-                    <input name="first_name" type="text" value={formData.first_name} onChange={handleChange} className={inputClass} />
+                    <input name="first_name" type="text" maxLength={100} value={formData.first_name} onChange={handleChange} className={inputClass} />
                   </div>
                   <div>
                     <label className={labelClass}>Last Name</label>
-                    <input name="last_name" type="text" value={formData.last_name} onChange={handleChange} className={inputClass} />
+                    <input name="last_name" type="text" maxLength={100} value={formData.last_name} onChange={handleChange} className={inputClass} />
                   </div>
                   <div>
                     <label className={labelClass}>Phone Number</label>
-                    <input name="phone_number" type="text" value={formData.phone_number} onChange={handleChange} placeholder="+1 (555) 000-0000" className={inputClass} />
+                    <input name="phone_number" type="text" maxLength={20} value={formData.phone_number} onChange={handleChange} placeholder="+1 (555) 000-0000" className={inputClass} />
                   </div>
                   <div>
                     <label className={labelClass}>Date of Birth</label>
-                    <input name="date_of_birth" type="date" value={formData.date_of_birth} onChange={handleChange} className={inputClass} />
+                    <input name="date_of_birth" type="date" min="1900-01-01" value={formData.date_of_birth} onChange={handleChange} className={inputClass} />
                   </div>
                   <div>
                     <label className={labelClass}>Gender</label>
@@ -422,11 +470,11 @@ export default function ProfileSettingsPage() {
                   </div>
                   <div className="md:col-span-2">
                     <label className={labelClass}>Nationality</label>
-                    <input name="nationality" type="text" value={formData.nationality} onChange={handleChange} placeholder="e.g. Sri Lankan" className={inputClass} />
+                    <input name="nationality" type="text" maxLength={100} value={formData.nationality} onChange={handleChange} placeholder="e.g. Sri Lankan" className={inputClass} />
                   </div>
                   <div className="md:col-span-2">
                     <label className={labelClass}>Home Address</label>
-                    <input name="address" type="text" value={formData.address} onChange={handleChange} placeholder="Enter your full address" className={inputClass} />
+                    <input name="address" type="text" maxLength={500} value={formData.address} onChange={handleChange} placeholder="Enter your full address" className={inputClass} />
                   </div>
                 </div>
               </div>
@@ -439,15 +487,15 @@ export default function ProfileSettingsPage() {
                   <div className="p-6 space-y-5">
                     <div>
                       <label className={labelClass}>Contact Name</label>
-                      <input name="emergency_contact_name" type="text" value={formData.emergency_contact_name} onChange={handleChange} placeholder="Contact name" className={inputClass} />
+                      <input name="emergency_contact_name" type="text" maxLength={100} value={formData.emergency_contact_name} onChange={handleChange} placeholder="Contact name" className={inputClass} />
                     </div>
                     <div>
                       <label className={labelClass}>Relationship</label>
-                      <input name="emergency_contact_relation" type="text" value={formData.emergency_contact_relation} onChange={handleChange} placeholder="e.g. Spouse, Parent" className={inputClass} />
+                      <input name="emergency_contact_relation" type="text" maxLength={50} value={formData.emergency_contact_relation} onChange={handleChange} placeholder="e.g. Spouse, Parent" className={inputClass} />
                     </div>
                     <div>
                       <label className={labelClass}>Contact Phone</label>
-                      <input name="emergency_contact_number" type="text" value={formData.emergency_contact_number} onChange={handleChange} placeholder="Emergency phone number" className={inputClass} />
+                      <input name="emergency_contact_number" type="text" maxLength={20} value={formData.emergency_contact_number} onChange={handleChange} placeholder="Emergency phone number" className={inputClass} />
                     </div>
                   </div>
                 </div>
@@ -459,15 +507,15 @@ export default function ProfileSettingsPage() {
                   <div className="p-6 space-y-5">
                     <div>
                       <label className={labelClass}>Bank Name</label>
-                      <input name="bank_name" type="text" value={formData.bank_name} onChange={handleChange} placeholder="Bank name" className={inputClass} />
+                      <input name="bank_name" type="text" maxLength={100} value={formData.bank_name} onChange={handleChange} placeholder="Bank name" className={inputClass} />
                     </div>
                     <div>
                       <label className={labelClass}>Account Number</label>
-                      <input name="bank_account_no" type="text" value={formData.bank_account_no} onChange={handleChange} placeholder="Account number" className={inputClass} />
+                      <input name="bank_account_no" type="text" maxLength={50} value={formData.bank_account_no} onChange={handleChange} placeholder="Account number" className={inputClass} />
                     </div>
                     <div>
                       <label className={labelClass}>Branch Name</label>
-                      <input name="bank_branch" type="text" value={formData.bank_branch} onChange={handleChange} placeholder="Branch name" className={inputClass} />
+                      <input name="bank_branch" type="text" maxLength={100} value={formData.bank_branch} onChange={handleChange} placeholder="Branch name" className={inputClass} />
                     </div>
                   </div>
                 </div>
@@ -480,11 +528,11 @@ export default function ProfileSettingsPage() {
                 <div className="p-6 space-y-5">
                   <div>
                     <label className={labelClass}>Skills</label>
-                    <textarea name="skills" value={formData.skills} onChange={handleChange} placeholder="List skills separated by commas (e.g., JavaScript, React, SQL)" className={`${inputClass} min-h-[100px] resize-none`} />
+                    <textarea name="skills" maxLength={2000} value={formData.skills} onChange={handleChange} placeholder="List skills separated by commas (e.g., JavaScript, React, SQL)" className={`${inputClass} min-h-[100px] resize-none`} />
                   </div>
                   <div>
                     <label className={labelClass}>Qualifications</label>
-                    <textarea name="qualifications" value={formData.qualifications} onChange={handleChange} placeholder="Enter educational qualifications and certifications" className={`${inputClass} min-h-[100px] resize-none`} />
+                    <textarea name="qualifications" maxLength={2000} value={formData.qualifications} onChange={handleChange} placeholder="Enter educational qualifications and certifications" className={`${inputClass} min-h-[100px] resize-none`} />
                   </div>
                 </div>
               </div>
