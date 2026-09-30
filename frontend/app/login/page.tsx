@@ -59,8 +59,12 @@ export default function LoginPage() {
    */
   const handleLogin = async (e: any) => {
     e.preventDefault();
-    setLoading(true);
     setErrorMsg("");
+    if (!email.trim() || !password) {
+      setErrorMsg("Enter your email or username and password.");
+      return;
+    }
+    setLoading(true);
 
     try {
       const res = await apiFetch("/auth/login", {
@@ -84,7 +88,11 @@ export default function LoginPage() {
       }
 
       await login(data.access_token);
-      await performRedirect();
+      if (data.must_change_password) {
+        router.push("/change-password");
+      } else {
+        await performRedirect();
+      }
     } catch (error: any) {
       console.error("Login error:", error);
       setErrorMsg(error.message || "Login failed. Please check backend connection.");
@@ -100,8 +108,12 @@ export default function LoginPage() {
    */
   const handle2FASubmit = async (e: any) => {
     e.preventDefault();
-    setLoading(true);
     setErrorMsg("");
+    if (otpCode.length !== OTP_CODE_LENGTH) {
+      setErrorMsg(`Enter the ${OTP_CODE_LENGTH}-digit code from your authenticator app.`);
+      return;
+    }
+    setLoading(true);
 
     try {
       const res = await apiFetch("/auth/login/2fa", {
@@ -118,7 +130,11 @@ export default function LoginPage() {
       }
 
       await login(data.access_token);
-      await performRedirect();
+      if (data.must_change_password) {
+        router.push("/change-password");
+      } else {
+        await performRedirect();
+      }
     } catch (error: any) {
       console.error("2FA error:", error);
       setErrorMsg(error.message || "Verification failed.");
@@ -151,6 +167,8 @@ export default function LoginPage() {
             focus:outline-none focus:ring-2 focus:ring-[#F2924E]"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+            autoComplete="username"
+            maxLength={255}
             required
           />
 
@@ -167,6 +185,8 @@ export default function LoginPage() {
               focus:outline-none focus:ring-2 focus:ring-[#F2924E]"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              maxLength={256}
               required
             />
             <button
@@ -229,8 +249,12 @@ export default function LoginPage() {
             text-center text-2xl tracking-widest text-[#1E293B] placeholder-[#D1D5DC]
             focus:outline-none focus:ring-2 focus:ring-[#F2924E]"
             value={otpCode}
-            onChange={(e) => setOtpCode(e.target.value)}
+            onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
             required
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern={`[0-9]{${OTP_CODE_LENGTH}}`}
+            title={`Enter the ${OTP_CODE_LENGTH}-digit code`}
             maxLength={OTP_CODE_LENGTH}
           />
 
