@@ -28,7 +28,7 @@ from typing import Callable
 
 from fastapi import HTTPException, Request, status
 
-from app.core.config import RATE_LIMIT_ENABLED
+from app.core.config import RATE_LIMIT_ENABLED, TRUST_PROXY_HEADERS
 
 # (scope, ip) -> (window_start_epoch, count)
 _HITS: dict[tuple[str, str], tuple[float, int]] = {}
@@ -40,8 +40,8 @@ _SWEEP_INTERVAL_SECONDS = 300
 
 
 def _client_ip(request: Request) -> str:
-    """Best-effort client IP. Honours X-Forwarded-For when behind a proxy."""
-    forwarded = request.headers.get("x-forwarded-for")
+    """Best-effort client IP. Honours X-Forwarded-For only when TRUST_PROXY_HEADERS is on."""
+    forwarded = request.headers.get("x-forwarded-for") if TRUST_PROXY_HEADERS else None
     if forwarded:
         # First entry is the original client.
         return forwarded.split(",")[0].strip()

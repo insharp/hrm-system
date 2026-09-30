@@ -1,16 +1,25 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Literal, Optional
 from datetime import datetime
 
 
 class NotificationCreate(BaseModel):
     user_id: int
-    message: str
-    type: str = "info"
-    link: Optional[str] = None
-    category: Optional[str] = None
-    entity_type: Optional[str] = None
-    entity_id: Optional[str] = None
+    message: str = Field(..., min_length=1, max_length=500)
+    type: Literal["info", "success", "warning", "error"] = "info"
+    link: Optional[str] = Field(default=None, max_length=500)
+    category: Optional[str] = Field(default=None, max_length=50)
+    entity_type: Optional[str] = Field(default=None, max_length=50)
+    entity_id: Optional[str] = Field(default=None, max_length=100)
+
+    @field_validator("link")
+    @classmethod
+    def _in_app_link(cls, v):
+        # Links are rendered as clickable in the bell/inbox — only allow paths
+        # inside this app, never "https://evil…" or "javascript:" URLs.
+        if v and (not v.startswith("/") or v.startswith("//")):
+            raise ValueError("link must be an in-app path starting with '/'")
+        return v
 
 
 class NotificationResponse(BaseModel):

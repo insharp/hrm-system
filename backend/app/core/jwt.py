@@ -1,4 +1,5 @@
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 from dotenv import load_dotenv
@@ -19,11 +20,14 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
+    # jti makes every token unique — without it two tokens issued in the same
+    # second for the same user are byte-identical, so "revoking" one by storing
+    # a new one doesn't actually invalidate the other.
+    to_encode.update({"exp": expire, "jti": secrets.token_urlsafe(16)})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def create_refresh_token(data: dict):
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire, "type": "refresh"})
+    to_encode.update({"exp": expire, "type": "refresh", "jti": secrets.token_urlsafe(16)})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
