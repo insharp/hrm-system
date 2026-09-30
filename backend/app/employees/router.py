@@ -121,6 +121,17 @@ def delete_employee(employee_id: int, db: Session = Depends(get_db)):
     return {"success": True, "message": "Employee deleted successfully"}
 
 
+@router.post("/{employee_id}/resend-login-details")
+def resend_login_details(
+    employee_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("employee:create")),
+):
+    """Email the employee a new temporary password (forced change on next login)."""
+    return service.resend_login_details(db, employee_id, current_user, background_tasks)
+
+
 @router.post("/test-email", dependencies=[Depends(require_permission("employee:create"))])
 def test_email(email: str):
     """Trigger a test welcome email to a specific address."""

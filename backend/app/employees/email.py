@@ -1,5 +1,6 @@
 import smtplib
 import os
+import html
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -23,11 +24,16 @@ SMTP_FROM = os.getenv("MAIL_FROM")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 
-def send_welcome_email(email: str, full_name: str, temp_password: str):
+def send_welcome_email(email: str, full_name: str, temp_password: str, expires_days: int = None):
     """
-    Sends a welcome email with a temporary password and a link to reset it.
+    Sends a welcome email with a temporary password and a link to the login page,
+    where the user is forced to replace it on first login.
     If email sending fails, it logs the error but doesn't raise an exception.
     """
+    # Only print the temporary password to the logs as a dev convenience — in
+    # production logs are shipped/retained and must never hold credentials.
+    log_password = os.getenv("ENVIRONMENT", "development").strip().lower() != "production"
+    fallback_password = temp_password if log_password else "<hidden in production — the employee can use Forgot Password to set one>"
     # Re-load .env fresh every call so credential changes take effect without restart
     load_dotenv(dotenv_path=env_path, override=True)
 
@@ -42,29 +48,33 @@ def send_welcome_email(email: str, full_name: str, temp_password: str):
     if not all([host, port, user, password, from_addr]):
         missing = [k for k, v in {"MAIL_SERVER": host, "MAIL_USERNAME": user, "MAIL_PASSWORD": password, "MAIL_FROM": from_addr}.items() if not v]
         logger.error(f"SMTP configuration is incomplete. Missing: {', '.join(missing)}")
-        logger.warning(f"[FALLBACK] Welcome email NOT sent for {email} ({full_name}). Temporary password (share manually): {temp_password}")
+        logger.warning(f"[FALLBACK] Welcome email NOT sent for {email} ({full_name}). Temporary password (share manually): {fallback_password}")
         return
 
     subject = "Welcome to the HRM System!"
-    reset_url = f"{frontend_url}/reset-password"
-    
+    login_url = f"{frontend_url}/login"
+    safe_name = html.escape(full_name or "")
+    safe_email = html.escape(email)
+    safe_password = html.escape(temp_password)
+    expiry_note = f" and expires after {int(expires_days)} days" if expires_days else ""
+
     html_content = f"""
     <html>
         <body>
-            <h3>Welcome, {full_name}!</h3>
+            <h3>Welcome, {safe_name}!</h3>
             <p>Your account has been created successfully. Below are your login credentials:</p>
             <ul>
-                <li><strong>Email:</strong> {email}</li>
-                <li><strong>Temporary Password:</strong> {temp_password}</li>
+                <li><strong>Email:</strong> {safe_email}</li>
+                <li><strong>Temporary Password:</strong> {safe_password}</li>
             </ul>
-            <p>Please note that you <strong>must</strong> change your password on your first login for security reasons.</p>
+            <p>Please note that you <strong>must</strong> choose a new password the first time you log in. The temporary password stops working once you do{expiry_note}, so please do this as soon as possible and do not share this email.</p>
             <p>
-                <a href="{reset_url}" style="padding: 10px 20px; background-color: #EE7F22; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">
-                    Set New Password
+                <a href="{login_url}" style="padding: 10px 20px; background-color: #EE7F22; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                    Log In &amp; Set Password
                 </a>
             </p>
             <p>If the button above does not work, copy and paste this link into your browser:<br>
-            {reset_url}</p>
+            {login_url}</p>
         </body>
     </html>
     """
@@ -93,5 +103,5 @@ def send_welcome_email(email: str, full_name: str, temp_password: str):
         logger.error(f"Failed to send welcome email to {email}: {str(e)}")
         logger.warning(
             f"[FALLBACK] Email delivery failed for {email} ({full_name}). "
-            f"Temporary password (share manually): {temp_password}"
+            f"Temporary password (share manually): {fallback_password}"
         )
