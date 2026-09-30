@@ -169,7 +169,8 @@ Forgot Password → reset.
 **Events**
 - `event_date` is stored in UTC and returned with a `Z` suffix.
 - Events can't be created in, or moved into, the past.
-- Reminders use the local day and time.
+- "Event created / updated / cancelled" notifications word the date in local
+  time. The daily reminder loops are unchanged (see Known issues 9).
 
 **Validation (422 or 400 with a readable message)**
 - **Profile:** name, phone, bank account and date-of-birth formats, plus field lengths.
@@ -235,6 +236,8 @@ Forgot Password → reset.
 8. `backend/app/auth/dependencies.py` has an older, unused `get_current_user`
    **without** the new checks. Always import from `app.core.deps`, and consider
    deleting that file.
+9. Reminder loops use the server's date, same as before. Making them use the local timezone requires changing already_notified_today() to count from local midnight, not current_date.
+10. The first-login allowlist in core/deps.py matches exact paths; if the API is ever served under a prefix such as --root-path /api, update the allowlist.
 
 ---
 
