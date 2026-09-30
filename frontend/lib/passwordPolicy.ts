@@ -49,7 +49,9 @@ export function passwordProblem(
   opts: { email?: string | null; names?: (string | null | undefined)[] } = {}
 ): string | null {
   const failed = PASSWORD_RULES.find((r) => !r.test(pw));
-  if (failed) return `Password needs: ${failed.label.toLowerCase()}.`;
+  // Lower-case only the first letter: lower-casing the whole label turned
+  // "(A–Z)" into "(a–z)" in the uppercase-rule message.
+  if (failed) return `Password needs: ${failed.label.charAt(0).toLowerCase()}${failed.label.slice(1)}.`;
   if (containsPersonalInfo(pw, opts.email, opts.names)) {
     return "Password must not contain your name or email address.";
   }

@@ -43,9 +43,9 @@ def password_policy_errors(
     if password != password.strip():
         errors.append("Password must not start or end with a space.")
     if not re.search(r"[A-Z]", password):
-        errors.append("Password must contain at least one uppercase letter.")
+        errors.append("Password must contain at least one uppercase letter (A-Z).")
     if not re.search(r"[a-z]", password):
-        errors.append("Password must contain at least one lowercase letter.")
+        errors.append("Password must contain at least one lowercase letter (a-z).")
     if not re.search(r"\d", password):
         errors.append("Password must contain at least one number.")
     if not any(ch in SPECIAL_CHARS for ch in password):

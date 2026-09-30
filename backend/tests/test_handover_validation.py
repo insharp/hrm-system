@@ -71,6 +71,12 @@ class TestPasswordPolicy:
         errors = " ".join(password_policy_errors(pw)).lower()
         assert fragment in errors
 
+    def test_case_rule_messages_name_the_right_range(self):
+        upper = " ".join(password_policy_errors("alllowercase1!"))
+        lower = " ".join(password_policy_errors("ALLUPPERCASE1!"))
+        assert "uppercase letter (A-Z)" in upper
+        assert "lowercase letter (a-z)" in lower
+
     def test_rejects_passwords_over_bcrypt_limit(self):
         assert password_policy_errors("Aa1!" + "x" * 70)
 
