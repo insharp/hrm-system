@@ -310,11 +310,6 @@ class TestMessageAndAnnouncementSchemas:
         with pytest.raises(ValidationError):
             MessageCreate(target_group="All", subject="  ", content="hi")
 
-    def test_group_name_length_limited(self):
-        from app.messages.schemas import MessageGroupCreate
-        with pytest.raises(ValidationError):
-            MessageGroupCreate(name="g" * 101)
-
     def test_announcement_update_rejects_blank_but_allows_omitted(self):
         from app.announcements.schemas import AnnouncementUpdate
         assert AnnouncementUpdate(content="new").title is None

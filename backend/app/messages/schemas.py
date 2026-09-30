@@ -35,15 +35,6 @@ class MessageCreate(BaseModel):
         return _required(v, "Message")
 
 
-class MessageGroupCreate(BaseModel):
-    name: str = Field(..., max_length=100)  # message_groups.name is VARCHAR(100)
-
-    @field_validator("name")
-    @classmethod
-    def _name(cls, v):
-        return _required(v, "Group name")
-
-
 class MessageUpdate(BaseModel):
     subject: str
     content: str

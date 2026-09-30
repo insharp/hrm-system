@@ -160,9 +160,13 @@ Forgot Password → reset.
    fine. For a fresh install, fix that migration (for example
    `DROP CONSTRAINT IF EXISTS`), or build the schema and then
    `alembic stamp head`.
-5. **Custom message groups have no members.** Superadmins can create them, but
-   a message sent to one reaches nobody. The API now refuses such sends with a
-   clear error. Member management needs adding, or the feature removing.
+5. **Custom message groups were removed.** They never had members, so a
+   message sent to one reached nobody. The `/messages/groups` endpoints and the
+   compose-screen group controls are gone. Messages can target All, All
+   Employees, HR or a department. The `message_groups` table and its
+   migrations are left untouched (unused), and old messages keep their original
+   `target_group` text. To restore the feature, revert the commit
+   "refactor(messages): remove custom message groups".
 6. **Access tokens stay valid for up to 15 minutes** after a password change or
    deactivation. Refresh tokens are revoked immediately. Add token versioning
    if instant cut-off is needed.

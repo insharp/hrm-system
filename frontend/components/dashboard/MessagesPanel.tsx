@@ -27,11 +27,9 @@ type Tab  = "inbox" | "sent" | "trash";
 type View = "list" | "read" | "compose" | "sent_success";
 
 export default function MessagesPanel({ isOpen, onClose }: Props) {
-  const { hasPermission, user: authUser } = useAuth();
-  const { showAlert, showConfirm } = useDialog();
+  const { hasPermission } = useAuth();
+  const { showAlert } = useDialog();
   const canSend = hasPermission("messaging.send");
-  // Use the actual DB flag \u2014 not a role name string match which is fragile
-  const isSuperAdmin = authUser?.is_superadmin === true;
 
   const [view,        setView]        = useState<View>("list");
   const [tab,         setTab]         = useState<Tab>("inbox");
@@ -49,10 +47,6 @@ export default function MessagesPanel({ isOpen, onClose }: Props) {
   const [sentSubject,  setSentSubject]  = useState("");
   const [sentTarget,   setSentTarget]   = useState("");
   const [departments,  setDepartments]  = useState<string[]>([]);
-  const [customGroups, setCustomGroups] = useState<{id: number; name: string}[]>([]);
-  const [newGroupName, setNewGroupName] = useState("");
-  const [addingGroup,  setAddingGroup]  = useState(false);
-  const [showGroupInput, setShowGroupInput] = useState(false);
 
 
 
@@ -66,15 +60,11 @@ export default function MessagesPanel({ isOpen, onClose }: Props) {
 
   const fetchComposeData = async () => {
     try {
-      const [dRes, gRes] = await Promise.all([
-        apiFetch("/departments/"),
-        apiFetch("/messages/groups"),
-      ]);
+      const dRes = await apiFetch("/departments/");
       if (dRes.ok) {
         const data = await dRes.json();
         setDepartments(data.map((d: any) => d.name).filter(Boolean));
       }
-      if (gRes.ok) setCustomGroups(await gRes.json());
     } catch {}
   };
 
@@ -457,15 +447,6 @@ export default function MessagesPanel({ isOpen, onClose }: Props) {
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider">To (Target Group)</label>
-                  {isSuperAdmin && (
-                    <button
-                      type="button"
-                      onClick={() => setShowGroupInput(v => !v)}
-                      className="text-[10px] text-[#f08a4b] font-bold hover:underline"
-                    >
-                      {showGroupInput ? "Cancel" : "+ New Group"}
-                    </button>
-                  )}
                 </div>
 
                 {/* Grouped Select */}
@@ -483,79 +464,8 @@ export default function MessagesPanel({ isOpen, onClose }: Props) {
                       {departments.map(d => <option key={d} value={d}>{d}</option>)}
                     </optgroup>
                   )}
-                  {customGroups.length > 0 && (
-                    <optgroup label="── Custom Groups ──">
-                      {customGroups.map(g => <option key={g.id} value={g.name}>{g.name}</option>)}
-                    </optgroup>
-                  )}
                 </select>
 
-                {/* Superadmin: Create new group inline */}
-                {showGroupInput && isSuperAdmin && (
-                  <div className="mt-2 flex gap-2 items-center">
-                    <input
-                      type="text"
-                      placeholder="New group name…"
-                      maxLength={100}
-                      value={newGroupName}
-                      onChange={e => setNewGroupName(e.target.value)}
-                      className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#f08a4b]"
-                    />
-                    <button
-                      type="button"
-                      disabled={addingGroup || !newGroupName.trim()}
-                      onClick={async () => {
-                        setAddingGroup(true);
-                        try {
-                          const res = await apiFetch("/messages/groups", {
-                            method: "POST",
-                            body: JSON.stringify({ name: newGroupName.trim() }),
-                          });
-                          if (res.ok) {
-                            const g = await res.json();
-                            setCustomGroups(prev => [...prev, g]);
-                            setTargetGroup(g.name);
-                            setNewGroupName("");
-                            setShowGroupInput(false);
-                          } else {
-                            const err = await res.json();
-                            await showAlert(formatApiError(err.detail, "Failed to create group"), { title: "Couldn't create group" });
-                          }
-                        } finally { setAddingGroup(false); }
-                      }}
-                      className="px-3 py-2 bg-[#f08a4b] text-white rounded-lg text-xs font-bold disabled:opacity-50 hover:bg-[#e47d3d] transition"
-                    >
-                      {addingGroup ? "…" : "Add"}
-                    </button>
-                  </div>
-                )}
-
-                {/* Superadmin: List + delete custom groups */}
-                {isSuperAdmin && customGroups.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {customGroups.map(g => (
-                      <span key={g.id} className="flex items-center gap-1 bg-orange-50 border border-orange-100 text-orange-700 text-[11px] font-semibold px-2 py-1 rounded-full">
-                        {g.name}
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const ok = await showConfirm(`The "${g.name}" group will be permanently deleted.`, {
-                              title: "Delete this group?",
-                              confirmText: "Delete",
-                            });
-                            if (!ok) return;
-                            await apiFetch(`/messages/groups/${g.id}`, { method: "DELETE" });
-                            setCustomGroups(prev => prev.filter(x => x.id !== g.id));
-                            if (targetGroup === g.name) setTargetGroup("All Employees");
-                          }}
-                          className="ml-0.5 text-orange-400 hover:text-red-500 transition"
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
               </div>
 
               {/* Subject */}

@@ -313,3 +313,45 @@ def test_get_sent_with_permission_returns_200():
 
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Custom message groups were removed (they had no members)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("method, path", [
+    ("get", "/messages/groups"),
+    ("post", "/messages/groups"),
+    ("delete", "/messages/groups/1"),
+])
+def test_custom_group_endpoints_are_gone(method, path):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = getattr(client, method)(path)
+    assert response.status_code in (404, 405)
+
+
+def test_send_to_former_custom_group_name_is_refused():
+    """A target that is neither a built-in group nor a department is a 400, not a silent no-op."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.core.deps import get_current_user
+    from app.database.database import get_db
+
+    sender = make_mock_user(user_id=1)
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.first.return_value = None  # no such department
+    app.dependency_overrides[get_current_user] = lambda: sender
+    app.dependency_overrides[get_db] = lambda: mock_db
+
+    client = TestClient(app, raise_server_exceptions=False)
+    with permissions_patch(["messaging.send"]):
+        response = client.post("/messages/", json={
+            "subject": "Hi", "content": "Team news", "target_group": "Project Falcon",
+        })
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    mock_db.add.assert_not_called()  # nothing saved
