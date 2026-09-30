@@ -3,7 +3,8 @@
 import { useRouter } from "next/navigation";
 import { CalendarDays, Plus, Pencil, Trash2, X, Check, CalendarPlus } from "lucide-react";
 import { useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, formatApiError } from "@/lib/api";
+import { parseEventDate, toDateTimeLocalInput, fromDateTimeLocalInput } from "@/lib/eventTime";
 import ModalPortal from "@/components/ModalPortal";
 import { useDialog } from "@/context/dialog-context";
 
@@ -51,7 +52,7 @@ export default function UpcomingEventsWidget({ permissions }: Props) {
     setEditItem(ev);
     setFormTitle(ev.title);
     setFormDesc(ev.description || "");
-    setFormDate(ev.event_date.slice(0, 16));
+    setFormDate(toDateTimeLocalInput(ev.event_date));
     setFormLocation(ev.location || "");
     setModalOpen(true);
   };
@@ -70,8 +71,12 @@ export default function UpcomingEventsWidget({ permissions }: Props) {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const dateStr = formDate.length === 16 ? formDate + ":00" : formDate;
-      const body = { title: formTitle, description: formDesc, event_date: dateStr, location: formLocation };
+      const body = {
+        title: formTitle.trim(),
+        description: formDesc.trim() || null,
+        event_date: fromDateTimeLocalInput(formDate),
+        location: formLocation.trim() || null,
+      };
       const endpoint = editItem ? `/events/${editItem.id}` : "/events";
       const method = editItem ? "PUT" : "POST";
       
@@ -86,7 +91,7 @@ export default function UpcomingEventsWidget({ permissions }: Props) {
         load();
       } else {
         const err = await res.json();
-        await showAlert(err.detail || "Failed to save event", { title: "Couldn't save event" });
+        await showAlert(formatApiError(err.detail, "Failed to save event"), { title: "Couldn't save event" });
       }
     } catch (e) {
       console.error(e);
@@ -109,7 +114,8 @@ export default function UpcomingEventsWidget({ permissions }: Props) {
     } catch (e) { console.error(e); }
   };
 
-  const parseLocal = (d: string) => new Date(d.endsWith("Z") ? d.slice(0, -1) : d);
+  // Stored UTC → shown in the viewer's local time (same as the Events page).
+  const parseLocal = parseEventDate;
 
   const fmtDate = (d: string) =>
     parseLocal(d).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -222,7 +228,7 @@ export default function UpcomingEventsWidget({ permissions }: Props) {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
-                <input className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={formTitle} onChange={(e) => setFormTitle(e.target.value)} placeholder="Event title" />
+                <input className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={formTitle} onChange={(e) => setFormTitle(e.target.value)} maxLength={200} placeholder="Event title" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Date & Time</label>
@@ -230,11 +236,11 @@ export default function UpcomingEventsWidget({ permissions }: Props) {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Location (optional)</label>
-                <input className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={formLocation} onChange={(e) => setFormLocation(e.target.value)} placeholder="e.g. Conference Room A" />
+                <input className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40" value={formLocation} onChange={(e) => setFormLocation(e.target.value)} maxLength={200} placeholder="e.g. Conference Room A" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
-                <textarea className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40 resize-none" rows={3} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} placeholder="Event details…" />
+                <textarea className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/40 resize-none" rows={3} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} maxLength={2000} placeholder="Event details…" />
               </div>
             </div>
             <div className="flex justify-end gap-3 mt-6">

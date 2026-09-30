@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { X, Search, MoreVertical, ArrowLeft, Send, Trash2, CheckSquare, Square, RotateCcw, CheckCircle2, Inbox, Mail } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, formatApiError } from "@/lib/api";
 import { useAuth } from "@/context/auth-context";
 import { useDialog } from "@/context/dialog-context";
 
@@ -109,15 +109,22 @@ export default function MessagesPanel({ isOpen, onClose }: Props) {
     try {
       const res = await apiFetch("/messages/", {
         method: "POST",
-        body: JSON.stringify({ target_group: targetGroup, subject, content: body }),
+        body: JSON.stringify({ target_group: targetGroup, subject: subject.trim(), content: body.trim() }),
       });
       if (res.ok) {
         setSentSubject(subject); setSentTarget(targetGroup);
         setSubject(""); setBody(""); setTargetGroup("All Employees");
         setView("sent_success");
         setTab("sent");
+      } else {
+        // e.g. the chosen group has nobody in it — tell the sender instead of
+        // leaving them on the compose form wondering what happened.
+        const err = await res.json().catch(() => ({}));
+        await showAlert(formatApiError(err.detail, "Failed to send message"), { title: "Message not sent" });
       }
-    } catch {}
+    } catch {
+      await showAlert("Could not connect to the server.", { title: "Network error" });
+    }
     finally { setSending(false); }
   };
 
@@ -489,6 +496,7 @@ export default function MessagesPanel({ isOpen, onClose }: Props) {
                     <input
                       type="text"
                       placeholder="New group name…"
+                      maxLength={100}
                       value={newGroupName}
                       onChange={e => setNewGroupName(e.target.value)}
                       className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#f08a4b]"
@@ -511,7 +519,7 @@ export default function MessagesPanel({ isOpen, onClose }: Props) {
                             setShowGroupInput(false);
                           } else {
                             const err = await res.json();
-                            await showAlert(err.detail || "Failed to create group", { title: "Couldn't create group" });
+                            await showAlert(formatApiError(err.detail, "Failed to create group"), { title: "Couldn't create group" });
                           }
                         } finally { setAddingGroup(false); }
                       }}
@@ -558,6 +566,7 @@ export default function MessagesPanel({ isOpen, onClose }: Props) {
                   required
                   placeholder="Enter subject…"
                   value={subject}
+                  maxLength={200}
                   onChange={e => setSubject(e.target.value)}
                   className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm bg-white focus:outline-none focus:border-[#f08a4b] focus:ring-2 focus:ring-[#f08a4b]/20 transition"
                 />
@@ -570,6 +579,7 @@ export default function MessagesPanel({ isOpen, onClose }: Props) {
                   required
                   placeholder="Write your message…"
                   value={body}
+                  maxLength={10000}
                   onChange={e => setBody(e.target.value)}
                   rows={10}
                   className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm bg-white focus:outline-none focus:border-[#f08a4b] focus:ring-2 focus:ring-[#f08a4b]/20 resize-none transition"

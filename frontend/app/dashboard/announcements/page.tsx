@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronRight, Bell, Plus, Pencil, Trash2, X, Check, Search } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, formatApiError } from "@/lib/api";
 import { useAuth } from "@/context/auth-context";
 import { useDialog } from "@/context/dialog-context";
 
@@ -17,7 +17,7 @@ interface Announcement {
 export default function AnnouncementsPage() {
   const router = useRouter();
   const { user } = useAuth();
-  const { showConfirm } = useDialog();
+  const { showConfirm, showAlert } = useDialog();
   const canManage = user?.permissions?.includes("widget.announcements.manage") ?? false;
 
   const [items, setItems] = useState<Announcement[]>([]);
@@ -60,13 +60,19 @@ export default function AnnouncementsPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      if (editItem) {
-        await apiFetch(`/announcements/${editItem.id}`, { method: "PUT", body: JSON.stringify({ title: formTitle, content: formContent }) });
-      } else {
-        await apiFetch("/announcements", { method: "POST", body: JSON.stringify({ title: formTitle, content: formContent }) });
+      const body = JSON.stringify({ title: formTitle.trim(), content: formContent.trim() });
+      const res = editItem
+        ? await apiFetch(`/announcements/${editItem.id}`, { method: "PUT", body })
+        : await apiFetch("/announcements", { method: "POST", body });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        await showAlert(formatApiError(err.detail, "Failed to save announcement"), { title: "Couldn't save announcement" });
+        return;
       }
       setModalOpen(false);
       load();
+    } catch {
+      await showAlert("Could not connect to the server.", { title: "Network error" });
     } finally { setSaving(false); }
   };
 
@@ -158,20 +164,20 @@ export default function AnnouncementsPage() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
                 <input
                   className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/30"
-                  value={formTitle} onChange={(e) => setFormTitle(e.target.value)} placeholder="Announcement title"
+                  value={formTitle} onChange={(e) => setFormTitle(e.target.value)} maxLength={200} placeholder="Announcement title"
                 />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Content</label>
                 <textarea
                   className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/30 resize-none"
-                  rows={5} value={formContent} onChange={(e) => setFormContent(e.target.value)} placeholder="Write your message…"
+                  rows={5} value={formContent} onChange={(e) => setFormContent(e.target.value)} maxLength={5000} placeholder="Write your message…"
                 />
               </div>
             </div>
             <div className="flex justify-end gap-3 mt-6">
               <button onClick={() => setModalOpen(false)} className="text-sm font-medium text-gray-600 px-4 py-2">Cancel</button>
-              <button onClick={handleSave} disabled={saving || !formTitle.trim()} className="flex items-center gap-1.5 bg-[#F2924E] hover:bg-orange-500 disabled:opacity-50 text-white text-sm font-medium px-6 py-2.5 rounded-xl transition">
+              <button onClick={handleSave} disabled={saving || !formTitle.trim() || !formContent.trim()} className="flex items-center gap-1.5 bg-[#F2924E] hover:bg-orange-500 disabled:opacity-50 text-white text-sm font-medium px-6 py-2.5 rounded-xl transition">
                 <Check size={14} /> {saving ? "Saving…" : "Save"}
               </button>
             </div>

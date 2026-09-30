@@ -3,7 +3,8 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronRight, CalendarDays, Plus, Pencil, Trash2, X, Check, Search, CalendarPlus, MapPin, Clock } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, formatApiError } from "@/lib/api";
+import { parseEventDate, toDateTimeLocalInput, fromDateTimeLocalInput } from "@/lib/eventTime";
 import { useAuth } from "@/context/auth-context";
 import { useDialog } from "@/context/dialog-context";
 
@@ -22,7 +23,7 @@ type Filter = "upcoming" | "all";
 export default function EventsPage() {
   const router = useRouter();
   const { user } = useAuth();
-  const { showConfirm } = useDialog();
+  const { showConfirm, showAlert } = useDialog();
   const canManage = user?.permissions?.includes("widget.upcoming_events.manage") ?? false;
 
   const [events, setEvents] = useState<Event[]>([]);
@@ -57,7 +58,7 @@ export default function EventsPage() {
     .sort((a, b) => new Date(b.event_date).getTime() - new Date(a.event_date).getTime());
 
   const openCreate = () => { setEditItem(null); setFormTitle(""); setFormDesc(""); setFormDate(""); setFormLocation(""); setModalOpen(true); };
-  const openEdit = (ev: Event) => { setEditItem(ev); setFormTitle(ev.title); setFormDesc(ev.description || ""); setFormDate(ev.event_date.slice(0, 16)); setFormLocation(ev.location || ""); setModalOpen(true); };
+  const openEdit = (ev: Event) => { setEditItem(ev); setFormTitle(ev.title); setFormDesc(ev.description || ""); setFormDate(toDateTimeLocalInput(ev.event_date)); setFormLocation(ev.location || ""); setModalOpen(true); };
   const handleDelete = async (id: number) => {
     const ok = await showConfirm("This event will be permanently deleted.", {
       title: "Delete this event?",
@@ -70,13 +71,24 @@ export default function EventsPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const body = { title: formTitle, description: formDesc, event_date: new Date(formDate).toISOString(), location: formLocation };
-      if (editItem) {
-        await apiFetch(`/events/${editItem.id}`, { method: "PUT", body: JSON.stringify(body) });
-      } else {
-        await apiFetch("/events", { method: "POST", body: JSON.stringify(body) });
+      const body = {
+        title: formTitle.trim(),
+        description: formDesc.trim() || null,
+        event_date: fromDateTimeLocalInput(formDate),
+        location: formLocation.trim() || null,
+      };
+      const res = editItem
+        ? await apiFetch(`/events/${editItem.id}`, { method: "PUT", body: JSON.stringify(body) })
+        : await apiFetch("/events", { method: "POST", body: JSON.stringify(body) });
+      if (!res.ok) {
+        // Previously the modal closed as if it had saved (e.g. a past date).
+        const err = await res.json().catch(() => ({}));
+        await showAlert(formatApiError(err.detail, "Failed to save event"), { title: "Couldn't save event" });
+        return;
       }
       setModalOpen(false); load();
+    } catch {
+      await showAlert("Could not connect to the server.", { title: "Network error" });
     } finally { setSaving(false); }
   };
 
@@ -91,11 +103,11 @@ export default function EventsPage() {
     } catch (e) { console.error(e); }
   };
 
-  const fmtDate = (d: string) => new Date(d + (d.endsWith("Z") ? "" : "Z"))
+  const fmtDate = (d: string) => parseEventDate(d)
     .toLocaleDateString("en-US", { weekday: "short", year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
   const daysUntil = (d: string) => {
-    const eventDate = new Date(d + (d.endsWith("Z") ? "" : "Z"));
+    const eventDate = parseEventDate(d);
     const today = new Date();
     
     const eDate = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate());
@@ -164,17 +176,17 @@ export default function EventsPage() {
           </div>
         ) : (
           filtered.map((ev) => {
-            const isPast = new Date(ev.event_date + (ev.event_date.endsWith("Z") ? "" : "Z")) < new Date();
+            const isPast = parseEventDate(ev.event_date) < new Date();
             return (
               <div key={ev.id} className={`bg-white border rounded-2xl p-6 hover:shadow-sm transition ${isPast ? "border-gray-100 opacity-70" : "border-gray-200"}`}>
                 <div className="flex items-start gap-4">
                   {/* Date badge */}
                   <div className={`flex-shrink-0 w-14 h-14 rounded-2xl flex flex-col items-center justify-center ${isPast ? "bg-gray-100" : "bg-orange-50"}`}>
                     <span className={`text-[10px] font-bold uppercase ${isPast ? "text-gray-400" : "text-[#F2924E]"}`}>
-                      {new Date(ev.event_date + (ev.event_date.endsWith("Z") ? "" : "Z")).toLocaleDateString("en", { month: "short" })}
+                      {parseEventDate(ev.event_date).toLocaleDateString("en", { month: "short" })}
                     </span>
                     <span className={`text-xl font-bold leading-none ${isPast ? "text-gray-500" : "text-gray-900"}`}>
-                      {new Date(ev.event_date + (ev.event_date.endsWith("Z") ? "" : "Z")).getDate()}
+                      {parseEventDate(ev.event_date).getDate()}
                     </span>
                   </div>
 
@@ -243,7 +255,7 @@ export default function EventsPage() {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
-                <input className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/30" value={formTitle} onChange={(e) => setFormTitle(e.target.value)} placeholder="Event title" />
+                <input className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/30" value={formTitle} onChange={(e) => setFormTitle(e.target.value)} maxLength={200} placeholder="Event title" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Date & Time</label>
@@ -251,11 +263,11 @@ export default function EventsPage() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Location (optional)</label>
-                <input className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/30" value={formLocation} onChange={(e) => setFormLocation(e.target.value)} placeholder="e.g. Main Conference Hall" />
+                <input className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/30" value={formLocation} onChange={(e) => setFormLocation(e.target.value)} maxLength={200} placeholder="e.g. Main Conference Hall" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
-                <textarea className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/30 resize-none" rows={4} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} placeholder="Event details…" />
+                <textarea className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#F2924E]/30 resize-none" rows={4} value={formDesc} onChange={(e) => setFormDesc(e.target.value)} maxLength={2000} placeholder="Event details…" />
               </div>
             </div>
             <div className="flex justify-end gap-3 mt-6">
