@@ -93,7 +93,7 @@ def test_login_returns_token_dict_structure():
 
     # Patch the DB query chain to return our mock user
     query_mock = MagicMock()
-    query_mock.filter.return_value.first.return_value = mock_user
+    query_mock.options.return_value.filter.return_value.first.return_value = mock_user
     mock_db.query.return_value = query_mock
 
     result = authenticate_user(mock_db, mock_user.email, raw_password)
@@ -117,7 +117,7 @@ def test_authenticate_user_wrong_password():
 
     mock_db = MagicMock()
     query_mock = MagicMock()
-    query_mock.filter.return_value.first.return_value = mock_user
+    query_mock.options.return_value.filter.return_value.first.return_value = mock_user
     mock_db.query.return_value = query_mock
 
     result = authenticate_user(mock_db, mock_user.email, "wrong_password")
@@ -131,8 +131,8 @@ def test_authenticate_user_nonexistent_email():
     match any user record in the database.
     """
     mock_db = MagicMock()
-    # Simulate no user found
-    mock_db.query.return_value.filter.return_value.first.return_value = None
+    # Simulate no user found (authenticate_user eager-loads roles via .options())
+    mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = None
 
     result = authenticate_user(mock_db, "nobody@example.com", "anypassword")
 
@@ -153,7 +153,7 @@ def test_authenticate_user_deleted_user_is_rejected():
     """
     mock_db = MagicMock()
     # The query returns None because the is_deleted filter excludes the row
-    mock_db.query.return_value.filter.return_value.first.return_value = None
+    mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = None
 
     result = authenticate_user(mock_db, "deleted@example.com", "anypassword")
 
