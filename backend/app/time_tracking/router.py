@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime, timezone, timedelta, date as date_type
 from decimal import Decimal
 import os
@@ -18,11 +18,22 @@ from app.time_tracking.schemas import (
     CheckPairResponse,
     OvertimeThresholdResponse,
     AllAttendanceResponse,
+    OvertimeThresholdUpdate,
 )
 
 router = APIRouter()
 
 DEFAULT_THRESHOLD = 8.0  # fallback if no threshold row exists
+# How far back/forward the week/day/month pickers may page. ~10 years back is
+# far more history than anyone browses; unbounded values used to overflow
+# timedelta (500) or spin the month loop for a very long time.
+MAX_PERIOD_OFFSET = 520
+
+
+def _period_offset():
+    # A fresh Query per parameter: FastAPI binds a Query object's name to the
+    # first parameter that uses it, so sharing one silently renames the others.
+    return Query(0, ge=-MAX_PERIOD_OFFSET, le=MAX_PERIOD_OFFSET)
 
 # ── Time zone handling ──────────────────────────────────────────────────────────
 # Two distinct concerns, kept separate:
@@ -339,16 +350,22 @@ def _auto_finalize_stale_days(db: Session, user_id: int) -> bool:
     return True
 
 
-def _week_bounds(offset: int = 0):
-    """Monday 00:00 → Sunday 23:59:59 for the given week offset (0=current).
+def _week_dates(offset: int = 0):
+    """LOCAL Monday and Sunday calendar dates for the given week offset (0=current)."""
+    today = _local_today()
+    monday = today - timedelta(days=today.weekday()) + timedelta(weeks=offset)
+    return monday, monday + timedelta(days=6)
 
-    Returned in UTC because history/weekly filter on start_time (a UTC instant).
+
+def _week_bounds(offset: int = 0):
+    """Local Monday 00:00 → local Sunday 23:59:59.999999, as UTC instants.
+
+    Returned in UTC because history/weekly filter on start_time (a UTC instant),
+    but the week itself follows LOCAL midnight like work days do — a session
+    started Monday 01:00 local (Sunday evening UTC) belongs to the new week.
     """
-    now = _utc_now()
-    monday = now - timedelta(days=now.weekday()) + timedelta(weeks=offset)
-    monday = monday.replace(hour=0, minute=0, second=0, microsecond=0)
-    sunday = monday + timedelta(days=6, hours=23, minutes=59, seconds=59)
-    return monday, sunday
+    monday, sunday = _week_dates(offset)
+    return _local_midnight_utc(monday), _local_day_end_utc(sunday)
 
 
 def _pairs_for_date(db: Session, user_id: int, target_date: date_type) -> List[dict]:
@@ -668,7 +685,7 @@ def get_current_session(
 # ── GET /history — Day-grouped entries (filterable by week) ───────────────────────
 @router.get("/history", response_model=List[DayEntryResponse])
 def get_history(
-    week: int = 0,
+    week: int = _period_offset(),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -707,7 +724,7 @@ def get_history(
 # ── GET /weekly-stats — Summary for the stats cards ──────────────────────────────
 @router.get("/weekly-stats", response_model=WeeklyStatsResponse)
 def get_weekly_stats(
-    week: int = 0,
+    week: int = _period_offset(),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -764,9 +781,10 @@ def get_weekly_stats(
     # Build day-grouped response
     day_responses = [_day_entry_response(db, entry) for entry in day_entries]
 
+    week_start, week_end = _week_dates(week)
     return {
-        "week_start": monday.strftime("%Y-%m-%d"),
-        "week_end": sunday.strftime("%Y-%m-%d"),
+        "week_start": week_start.isoformat(),
+        "week_end": week_end.isoformat(),
         "total_hours": total,
         "regular_hours": regular,
         "overtime_hours": ot_sum,
@@ -805,7 +823,7 @@ def get_overtime_threshold(
     dependencies=[Depends(require_permission("time_tracking:edit_overtime_threshold"))],
 )
 def update_overtime_threshold(
-    payload: dict,
+    payload: OvertimeThresholdUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -814,17 +832,7 @@ def update_overtime_threshold(
     effective_date = today. Only affects future/today's overtime calculations.
     Past finalized days remain unchanged.
     """
-    new_threshold = payload.get("threshold_hours")
-    if new_threshold is None or not isinstance(new_threshold, (int, float)):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="threshold_hours is required and must be a number."
-        )
-    if new_threshold <= 0 or new_threshold > 24:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="threshold_hours must be between 0 and 24."
-        )
+    new_threshold = payload.threshold_hours
 
     today = _local_today()
     row = OvertimeThresholdHistory(
@@ -857,8 +865,8 @@ def clock_out_compat(db=Depends(get_db), current_user=Depends(get_current_user))
 
 @router.get("/all-attendance", response_model=AllAttendanceResponse, dependencies=[Depends(require_permission("attendance:view_others"))])
 def get_all_attendance(
-    period: str = "week",
-    offset: int = 0,
+    period: Literal["day", "week", "month"] = "week",
+    offset: int = _period_offset(),
     db: Session = Depends(get_db)
 ):
     """
@@ -874,23 +882,19 @@ def get_all_attendance(
         end_date = start_date + timedelta(days=1, microseconds=-1)
     elif period == "month":
         # Simplified month arithmetic (good enough for typical offsets)
-        target_month = now.month + offset
-        target_year = now.year
-        while target_month <= 0:
-            target_month += 12
-            target_year -= 1
-        while target_month > 12:
-            target_month -= 12
-            target_year += 1
+        years, month_index = divmod(now.month - 1 + offset, 12)
+        target_year, target_month = now.year + years, month_index + 1
         start_date = datetime(target_year, target_month, 1)
         # Next month start minus 1 microsecond
         next_month = target_month + 1 if target_month < 12 else 1
         next_year = target_year if target_month < 12 else target_year + 1
         end_date = datetime(next_year, next_month, 1) - timedelta(microseconds=1)
-    else:  # default to week
-        monday, sunday = _week_bounds(offset)
-        start_date = monday
-        end_date = sunday
+    else:  # week
+        # Local dates, not the UTC instants from _week_bounds(): the filter below
+        # is on the local `date` column.
+        monday, sunday = _week_dates(offset)
+        start_date = datetime.combine(monday, datetime.min.time())
+        end_date = datetime.combine(sunday, datetime.max.time())
         
     start_date_only = start_date.date()
     end_date_only = end_date.date()

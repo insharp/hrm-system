@@ -78,6 +78,6 @@ def update_dashboard_layout(
     permissions = get_user_permissions(current_user, db)
     allowed = _allowed_widgets_from_permissions(permissions)
     # Only persist widgets the user is actually allowed to have
-    safe_widgets = [w for w in data.widgets if w.get("i") in allowed]
+    safe_widgets = [w.model_dump() for w in data.widgets if w.i in allowed]
     saved = save_layout(db, current_user.id, safe_widgets)
     return {"widgets": saved, "role": current_user.role, "allowed_widgets": allowed}

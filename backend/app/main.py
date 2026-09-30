@@ -97,7 +97,8 @@ async def holiday_reminder_loop():
                     from app.auth.models import User
                     from app.notifications.service import notify_users, already_notified_today
 
-                    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+                    from app.core.app_time import local_today
+                    tomorrow = (local_today() + timedelta(days=1)).isoformat()
 
                     db = SessionLocal()
                     try:
@@ -151,9 +152,9 @@ async def daily_digest_loop():
             # One worker per cycle runs events/celebrations/purge (advisory lock).
             with advisory_lock("daily_digest") as got_lock:
                 if got_lock:
-                    from datetime import date
+                    from app.core.app_time import local_today
 
-                    today = date.today()
+                    today = local_today()
                     db = SessionLocal()
                     try:
                         _notify_tomorrows_events(db, today)
@@ -178,16 +179,19 @@ def _active_user_ids(db) -> list:
 def _notify_tomorrows_events(db, today) -> None:
     """Remind everyone about events happening tomorrow, at most once per event per day."""
     try:
-        from datetime import datetime, timedelta, time as dt_time
+        from datetime import timedelta
         from app.events.models import Event
         from app.notifications.service import notify_users, already_notified_today
+        from app.core.app_time import local_day_bounds_utc, to_local
 
+        # event_date is stored UTC; "tomorrow" is the organisation's local day.
         tomorrow = today + timedelta(days=1)
+        start_utc, end_utc = local_day_bounds_utc(tomorrow)
         events = (
             db.query(Event)
             .filter(
-                Event.event_date >= datetime.combine(tomorrow, dt_time.min),
-                Event.event_date <= datetime.combine(tomorrow, dt_time.max),
+                Event.event_date >= start_utc,
+                Event.event_date <= end_utc,
             )
             .all()
         )
@@ -204,7 +208,7 @@ def _notify_tomorrows_events(db, today) -> None:
             # every restart and must not re-send the same reminder.
             if already_notified_today(db, "event_reminder", ev.id):
                 continue
-            when = ev.event_date.strftime("%I:%M %p").lstrip("0")
+            when = to_local(ev.event_date).strftime("%I:%M %p").lstrip("0")
             location = f" at {ev.location}" if ev.location else ""
             notify_users(
                 db,

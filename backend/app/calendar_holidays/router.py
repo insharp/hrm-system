@@ -6,7 +6,7 @@ from app.core.deps import get_current_user, require_permission
 from app.auth.models import User
 from app.calendar_holidays.models import Holiday
 from app.calendar_holidays.schemas import HolidayCreate, HolidayResponse
-from sqlalchemy import text
+from sqlalchemy import text, func
 
 router = APIRouter()
 
@@ -70,10 +70,20 @@ def get_holidays(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return db.query(Holiday).all()
+    return db.query(Holiday).order_by(Holiday.date).all()
+
+def _reject_duplicate(db: Session, data: HolidayCreate, exclude_id: int = None) -> None:
+    """The same holiday twice on one date would double-count in the calendar."""
+    q = db.query(Holiday).filter(Holiday.date == data.date, func.lower(Holiday.name) == data.name.lower())
+    if exclude_id is not None:
+        q = q.filter(Holiday.id != exclude_id)
+    if q.first():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This holiday already exists on that date")
+
 
 @router.post("", response_model=HolidayResponse)
 def add_holiday(data: HolidayCreate, db: Session = Depends(get_db), current_user: User = Depends(require_permission("widget.calendar.edit"))):
+    _reject_duplicate(db, data)
     holiday = Holiday(name=data.name, date=data.date, is_mercantile=data.is_mercantile, created_by=current_user.id)
     db.add(holiday)
     db.commit()
@@ -85,6 +95,7 @@ def update_holiday(holiday_id: int, data: HolidayCreate, db: Session = Depends(g
     holiday = db.query(Holiday).filter(Holiday.id == holiday_id).first()
     if not holiday:
         raise HTTPException(status_code=404, detail="Holiday not found")
+    _reject_duplicate(db, data, exclude_id=holiday_id)
     holiday.name = data.name
     holiday.date = data.date
     holiday.is_mercantile = data.is_mercantile

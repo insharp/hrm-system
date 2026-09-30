@@ -8,6 +8,7 @@ from app.core.deps import get_current_user, require_permission
 from app.auth.models import User
 from app.events.models import Event, UserCalendarEvent
 from app.events.schemas import EventCreate, EventUpdate, EventResponse, EventWithStatus
+from app.core.app_time import to_local, local_today
 
 router = APIRouter()
 
@@ -20,8 +21,10 @@ def _format_event_date(event_date: datetime) -> str:
 
     Includes its own preposition ("today at …" vs "on Jul 28, 2026") so callers
     can drop it straight into a sentence without producing "on today at …".
+    `event_date` is stored UTC; people read local time.
     """
-    today = datetime.utcnow().date()
+    event_date = to_local(event_date)
+    today = local_today()
     d = event_date.date()
     if d == today:
         return f"today at {event_date.strftime('%I:%M %p').lstrip('0')}"
@@ -37,7 +40,8 @@ def _format_cancellation(title: str, event_date: datetime) -> str:
     An event cancelled on the day it falls reads "is not held today"; anything
     further out reads as a plain cancellation with its date.
     """
-    today = datetime.utcnow().date()
+    event_date = to_local(event_date)
+    today = local_today()
     d = event_date.date()
     if d == today:
         return f"{title} is not held today"
@@ -152,6 +156,9 @@ def save_event_to_calendar(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if not db.query(Event.id).filter(Event.id == event_id).first():
+        raise HTTPException(status_code=404, detail="Event not found")
+
     # Check if already saved
     existing = db.query(UserCalendarEvent).filter(
         UserCalendarEvent.user_id == current_user.id,
@@ -191,8 +198,9 @@ def create_event(
 ):
     # Reject past-dated events on creation. Otherwise the event saves but is
     # hidden from the "upcoming" list (which filters event_date >= now) — a
-    # confusing saved-and-invisible state (BUG-22 / TC-EVT-008).
-    if data.event_date.date() < datetime.utcnow().date():
+    # confusing saved-and-invisible state (BUG-22 / TC-EVT-008). Compared to the
+    # minute, not the day: an event earlier today is just as invisible.
+    if data.event_date < datetime.utcnow() - timedelta(minutes=1):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Event date cannot be in the past.",
@@ -233,7 +241,16 @@ def update_event(
 
     was_upcoming = ev.event_date >= datetime.utcnow()
 
-    for field, value in data.model_dump(exclude_unset=True).items():
+    changes = data.model_dump(exclude_unset=True)
+    # Moving an event INTO the past has the same saved-but-invisible problem as
+    # creating one there. Editing other fields of a past event stays allowed.
+    if "event_date" in changes and changes["event_date"] != ev.event_date             and changes["event_date"] < datetime.utcnow() - timedelta(minutes=1):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Event date cannot be in the past.",
+        )
+
+    for field, value in changes.items():
         setattr(ev, field, value)
     db.commit()
     db.refresh(ev)
